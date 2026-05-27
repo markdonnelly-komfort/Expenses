@@ -468,12 +468,13 @@ function navItems(){
   if (isFinance()) items.push({ id:'dashboard', label:'Dashboard', ic:'▦' });
   items.push({ id:'my-expenses', label:'My Expenses', ic:'£', sec:'Mine' });
   if (isCC()) items.push({ id:'my-cc', label:'Credit Card', ic:'▭' });
-  items.push({ id:'my-mileage', label:'My Mileage', ic:'⛽' });
+  items.push({ id:'my-mileage', label:'My Mileage', ic:'⛽', onclick:"window._mtUser=undefined;navigate('my-mileage')" });
   if (isManager()) items.push({ id:'approvals', label:'Approvals', ic:'✔', badge:'mgr', sec:'Approve' });
   if (isFinance()){
     items.push({ id:'finance-approvals', label:'Finance Approvals', ic:'✔', badge:'fin', sec:'Finance' });
     items.push({ id:'all-claims', label:'All Claims', ic:'≡' });
     items.push({ id:'payment-runs', label:'Payment Runs', ic:'⇄' });
+    items.push({ id:'mileage-all', label:'Mileage Tracker', ic:'⛽', onclick:"window._mtUser='ALL';navigate('mileage-all')" });
     items.push({ id:'analytics', label:'Reports', ic:'▣' });
     items.push({ id:'adm-users', label:'Users', ic:'⚷', sec:'Administration' });
     items.push({ id:'adm-categories', label:'Categories', ic:'▤' });
@@ -493,7 +494,7 @@ async function buildNav(){
   items.forEach(i => {
     if (i.sec && i.sec !== lastSec){ html += `<div class="nav-section">${i.sec}</div>`; lastSec = i.sec; }
     const b = i.badge && badges[i.badge] ? `<span class="nav-badge">${badges[i.badge]}</span>` : '';
-    html += `<div class="nav-item" data-page="${i.id}" onclick="navigate('${i.id}')"><span class="ic">${i.ic}</span><span>${i.label}</span>${b}</div>`;
+    html += `<div class="nav-item" data-page="${i.id}" onclick="${i.onclick || `navigate('${i.id}')`}"><span class="ic">${i.ic}</span><span>${i.label}</span>${b}</div>`;
   });
   nav.innerHTML = html;
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === state.page));
@@ -508,7 +509,7 @@ async function computeBadges(){
   return { mgr, fin };
 }
 const PAGE_TITLES = {
-  dashboard:'Dashboard', 'my-expenses':'My Expense Reports', 'my-cc':'Company Credit Card', 'my-mileage':'Mileage Tracker', approvals:'Approvals',
+  dashboard:'Dashboard', 'my-expenses':'My Expense Reports', 'my-cc':'Company Credit Card', 'my-mileage':'My Mileage', 'mileage-all':'Mileage Tracker — All Employees', approvals:'Approvals',
   'finance-approvals':'Finance Approvals', 'all-claims':'All Claims', 'payment-runs':'Payment Runs', analytics:'Reports',
   'adm-users':'Users', 'adm-categories':'Categories', 'adm-departments':'Departments', 'adm-vehicles':'Mileage Rate Categories',
   'adm-mileage':'Mileage Rates', 'adm-vat':'VAT Rates', 'adm-suppliers':'Suppliers'
@@ -528,6 +529,7 @@ async function navigate(page){
       case 'my-expenses': await renderReportList(c,'expense'); break;
       case 'my-cc': await renderReportList(c,'creditcard'); break;
       case 'my-mileage': await renderMileageTracker(c); break;
+      case 'mileage-all': await renderMileageTracker(c); break;
       case 'approvals': await renderApprovals(c); break;
       case 'finance-approvals': await renderFinanceApprovals(c); break;
       case 'all-claims': await renderAllClaims(c); break;
@@ -1124,11 +1126,11 @@ async function renderMileageTracker(c){
   const fin = isFinance();
   const ty = window._mtTY && recentTaxYears(6).includes(window._mtTY) ? window._mtTY : taxYearOf(today());
   const tyOpts = recentTaxYears(6).map(t=>`<option ${t===ty?'selected':''}>${t}</option>`).join('');
-  let viewUser = fin ? (window._mtUser || state.user.id) : state.user.id;
+  let viewUser = fin ? (window._mtUser !== undefined ? window._mtUser : (state.page==='mileage-all' ? 'ALL' : state.user.id)) : state.user.id;
   const users = fin ? (await idbGetAll('users')).sort((a,b)=>a.full_name.localeCompare(b.full_name)) : [];
   const showAll = fin && viewUser==='ALL';
-  let toolbar = `<div class="toolbar"><label class="small muted">Tax year</label><select onchange="window._mtTY=this.value;navigate('my-mileage')">${tyOpts}</select>`;
-  if (fin) toolbar += `<label class="small muted">Employee</label><select onchange="window._mtUser=this.value;navigate('my-mileage')"><option value="ALL" ${showAll?'selected':''}>All employees</option>${users.map(u=>`<option value="${u.id}" ${viewUser===u.id?'selected':''}>${esc(u.full_name)}</option>`).join('')}</select>`;
+  let toolbar = `<div class="toolbar"><label class="small muted">Tax year</label><select onchange="window._mtTY=this.value;navigate(state.page)">${tyOpts}</select>`;
+  if (fin) toolbar += `<label class="small muted">Employee</label><select onchange="window._mtUser=this.value;navigate(state.page)"><option value="ALL" ${showAll?'selected':''}>All employees</option>${users.map(u=>`<option value="${u.id}" ${viewUser===u.id?'selected':''}>${esc(u.full_name)}</option>`).join('')}</select>`;
   toolbar += `</div>`;
 
   if (showAll){
@@ -1137,7 +1139,7 @@ async function renderMileageTracker(c){
     setTopbar(`<button class="btn btn-accent" onclick="addMileageAdjustment('','${ty}')">+ Mileage adjustment</button> <button class="btn btn-info" onclick="exportMileageTracker('${ty}')">Export (Excel)</button>`);
     c.innerHTML = toolbar + `<div class="card"><div class="card-head"><h3>Mileage by employee — ${ty} tax year</h3></div>
       <div class="table-wrap"><table><thead><tr><th>Employee</th><th class="num">Own-car mi</th><th class="num">Company mi</th><th class="num">Adjust. mi</th><th class="num">Total mi</th><th class="num">Approved total</th><th class="num">To 10k</th><th class="num">Paid</th><th></th></tr></thead><tbody>
-        ${rows.map(({u,s})=>`<tr class="clickable" onclick="window._mtUser='${u.id}';navigate('my-mileage')"><td><strong>${esc(u.full_name)}</strong></td>
+        ${rows.map(({u,s})=>`<tr class="clickable" onclick="window._mtUser='${u.id}';navigate(state.page)"><td><strong>${esc(u.full_name)}</strong></td>
           <td class="num">${s.own}</td><td class="num">${s.company}</td><td class="num">${s.adjMiles}</td><td class="num">${s.total}</td>
           <td class="num">${s.approvedTotal}${s.approvedTotal>AMAP_THRESHOLD?' <span class="badge b-amber">over 10k</span>':''}</td><td class="num">${s.remaining}</td><td class="num">${fmtMoney(s.amount)}</td><td>›</td></tr>`).join('')
         || '<tr><td colspan="9" class="muted" style="text-align:center;padding:24px">No mileage recorded this tax year.</td></tr>'}
@@ -1184,7 +1186,7 @@ async function saveMileageAdjustment(){
   if(!userId||!ty||!miles){ toast('Employee, tax year and miles are required','error'); return; }
   await idbPut('mileage_adjustments',{ id:uuid(), user_id:userId, tax_year:ty, miles, date:val('ma-date')||today(), note:val('ma-note'), created_by:state.user.id, created_at:nowISO() });
   await logAction('mileage_adjustment',{ user_id:userId, tax_year:ty, miles });
-  window._mtUser=userId; window._mtTY=ty; closeModal(); toast('Adjustment added'); navigate('my-mileage');
+  window._mtUser=userId; window._mtTY=ty; closeModal(); toast('Adjustment added'); navigate(state.page==='mileage-all'?'mileage-all':'my-mileage');
 }
 async function exportMileageTracker(ty, userId){
   const users = await idbGetAll('users');
