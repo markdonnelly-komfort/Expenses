@@ -556,7 +556,20 @@ function setTopbar(html){ document.getElementById('topbar-actions').innerHTML = 
 function toast(msg, type='success'){ const el=document.createElement('div'); el.className=`toast toast-${type}`; el.textContent=msg; document.getElementById('toast-container').appendChild(el); setTimeout(()=>el.remove(),3800); }
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function openModal(html, wide){ const m=document.getElementById('modal'); m.className='modal'+(wide?' wide':''); m.innerHTML=html; document.getElementById('modal-overlay').classList.add('active'); }
-function closeModal(){ document.getElementById('modal-overlay').classList.remove('active'); }
+function closeModal(){ document.getElementById('modal-overlay').classList.remove('active'); _modalStack=[]; }
+// Modal stack: open a new modal on top of an existing one and pop back when done.
+let _modalStack = [];
+function pushModal(html, wide){
+  const m = document.getElementById('modal');
+  if (document.getElementById('modal-overlay').classList.contains('active')){
+    _modalStack.push({ html:m.innerHTML, wide:m.className.includes('wide') });
+  }
+  openModal(html, wide);
+}
+function popOrCloseModal(){
+  if (_modalStack.length){ const prev=_modalStack.pop(); const m=document.getElementById('modal'); m.className='modal'+(prev.wide?' wide':''); m.innerHTML=prev.html; }
+  else closeModal();
+}
 document.getElementById('modal-overlay').addEventListener('click', e=>{ if(e.target.id==='modal-overlay') closeModal(); });
 function val(id){ const e=document.getElementById(id); return e? e.value.trim() : ''; }
 function numVal(id){ const v=val(id); return v===''?0:Number(v); }
@@ -638,7 +651,7 @@ function renderReceiptThumbs(){
   const box = document.getElementById('rc-thumbs'); if(!box) return;
   box.innerHTML = _lineReceipts.map((r,i)=>{
     const inner = (r.mime||'').startsWith('image/') ? `<img src="${r.data}" alt="">` : `<span class="doc">📄</span>`;
-    return `<div class="receipt-thumb" onclick="viewReceipt(${i})">${inner}<button class="rm" onclick="event.stopPropagation();removeReceipt(${i})">×</button></div>`;
+    return `<div class="receipt-thumb" data-preview-src="${esc(r.data)}" data-preview-mime="${esc(r.mime||'')}" onclick="viewReceipt(${i})">${inner}<button class="rm" onclick="event.stopPropagation();removeReceipt(${i})">×</button></div>`;
   }).join('') || '<span class="small muted">No receipts attached.</span>';
 }
 function addReceipts(e){
@@ -828,7 +841,12 @@ function mileageRateDesc(l){
 function receiptCountBadge(l){ const n=(l.receipts||[]).length; return n?`<span class="badge b-grey" title="${n} receipt(s)" style="cursor:pointer" onclick="showLineReceipts('${l.id}')">📎 ${n}</span>`:'<span class="small muted">—</span>'; }
 async function showLineReceipts(lineId){
   const l = await idbGet('lines', lineId); const rs=l.receipts||[];
-  openModal(`<h2>Receipts</h2><div class="receipts">${rs.map((r,i)=>{const inner=(r.mime||'').startsWith('image/')?`<img src="${r.data}">`:`<span class="doc">📄</span>`;return `<div class="receipt-thumb" onclick="viewReceiptData('${r.data}','${r.mime}')">${inner}</div>`;}).join('')||'<span class="muted small">None.</span>'}</div><div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Close</button></div>`);
+  const thumbs = rs.map((r,i)=>{
+    const inner = (r.mime||'').startsWith('image/') ? `<img src="${r.data}">` : `<span class="doc">📄</span>`;
+    return `<div class="receipt-thumb" data-preview-src="${esc(r.data)}" data-preview-mime="${esc(r.mime||'')}" onclick="viewReceiptData('${r.data}','${r.mime}')">${inner}</div>`;
+  }).join('') || '<span class="muted small">None.</span>';
+  const html = `<h2>Receipts</h2><div class="modal-sub">Hover over an image for a larger preview, or click to open.</div><div class="receipts">${thumbs}</div><div class="modal-actions"><button class="btn btn-outline" onclick="popOrCloseModal()">Close</button></div>`;
+  pushModal(html);
 }
 
 function approvalTrailHtml(r){
@@ -885,7 +903,7 @@ async function openExpenseLineModal(line){
   const supOpts = optionList(sups.map(s=>({value:s.id,label:s.name})), line?.supplier_id, true);
   const vatOpts = optionList(vats.filter(v=>v.active!==0).map(v=>({value:v.id,label:`${v.name}`})), line?.vat_rate_id || vats.find(v=>v.name.includes('Standard'))?.id, false);
   openModal(`<h2>${line?'Edit':'Add'} expense</h2>
-    <div class="scan-box">📷 <strong>Auto-scan (beta):</strong> attach a receipt photo below, then click <em>Scan receipt</em> to auto-fill the date, amount &amp; supplier. <span class="muted">Needs an internet connection the first time it runs.</span></div>
+    <div class="scan-box">📷 <strong>Auto-scan (beta):</strong> attach a receipt photo or PDF below, then click <em>Scan receipt</em> to auto-fill the date, amount &amp; supplier. <span class="muted">Needs an internet connection the first time it runs.</span></div>
     <div class="form-row"><div class="form-group"><label class="req">Date</label><input type="date" id="el-date" value="${line?.line_date||today()}"></div>
       <div class="form-group"><label>Supplier</label><select id="el-supplier">${supOpts}</select>
         <button type="button" class="btn btn-sm btn-outline" style="margin-top:6px" onclick="toggleNewSupplier()">+ New supplier</button>
@@ -1058,15 +1076,46 @@ function loadTesseract(){
   if (window.Tesseract) return Promise.resolve(window.Tesseract);
   return new Promise((res,rej)=>{ const s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'; s.onload=()=>res(window.Tesseract); s.onerror=()=>rej(new Error('load failed')); document.head.appendChild(s); });
 }
+function loadPdfJs(){
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  return new Promise((res,rej)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
+    s.onload = () => { try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js'; } catch(e){} res(window.pdfjsLib); };
+    s.onerror = () => rej(new Error('load failed'));
+    document.head.appendChild(s);
+  });
+}
+function dataURLtoUint8Array(dataUrl){
+  const b64 = (dataUrl||'').split(',')[1] || '';
+  const bin = atob(b64); const u = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+async function pdfFirstPageToImage(dataUrl){
+  const pdfjs = await loadPdfJs();
+  const pdf = await pdfjs.getDocument({ data: dataURLtoUint8Array(dataUrl) }).promise;
+  const page = await pdf.getPage(1);
+  const viewport = page.getViewport({ scale: 2 });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width; canvas.height = viewport.height;
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  return canvas.toDataURL('image/png');
+}
 async function runReceiptScan(){
-  const img = _lineReceipts.find(r=>(r.mime||'').startsWith('image/'));
-  if(!img){ toast('Attach a receipt photo first','error'); return; }
+  // Prefer the first image; otherwise fall back to the first PDF
+  const r = _lineReceipts.find(x=>(x.mime||'').startsWith('image/')) || _lineReceipts.find(x=>(x.mime||'').toLowerCase().includes('pdf'));
+  if(!r){ toast('Attach a receipt photo or PDF first','error'); return; }
   toast('Scanning receipt…','info');
+  let imageData = r.data;
+  if ((r.mime||'').toLowerCase().includes('pdf')){
+    try { imageData = await pdfFirstPageToImage(r.data); }
+    catch(e){ toast('Could not read the PDF — needs internet on first scan, or enter manually','error'); return; }
+  }
   let T; try { T = await loadTesseract(); } catch(e){ toast('Auto-scan needs an internet connection — enter details manually','error'); return; }
   try{
-    const { data } = await T.recognize(img.data, 'eng');
-    const text = data.text || '';
-    parseReceiptText(text);
+    const { data } = await T.recognize(imageData, 'eng');
+    parseReceiptText(data.text || '');
     toast('Scan complete — please check the fields');
   }catch(e){ toast('Could not read the receipt — enter details manually','error'); }
 }
@@ -1401,36 +1450,41 @@ async function renderAnalytics(c){
   const allLines = await idbGetAll('lines');
   const cats = await refAll('categories'); const depts = await refAll('departments'); const sups = await refAll('suppliers'); const vats = await refAll('vat_rates');
   const linesByReport = {}; allLines.forEach(l=>{ (linesByReport[l.report_id]=linesByReport[l.report_id]||[]).push(l); });
-  // Aggregations
+  // Aggregations — track net, VAT and gross per key
   const byUser={}, byCat={}, byDept={};
+  const bump = (m,k,g,v) => { const o = m[k] || (m[k]={net:0,vat:0,gross:0}); o.gross+=g; o.vat+=v; o.net += g-v; };
   let gross=0, vat=0;
   reports.forEach(r=>{
     const ls = linesByReport[r.id]||[]; const owner=state.usersById[r.user_id];
     ls.forEach(l=>{
       const g=Number(l.amount)||0, v=Number(l.vat_amount)||0; gross+=g; vat+=v;
-      byUser[r.user_id]=(byUser[r.user_id]||0)+g;
-      const ck = l.line_type==='mileage'?'Mileage':(cats.find(x=>x.id===l.category_id)?.name||'Uncategorised'); byCat[ck]=(byCat[ck]||0)+g;
-      const dk = depts.find(d=>d.id===owner?.department_id)?.name||'Unassigned'; byDept[dk]=(byDept[dk]||0)+g;
+      bump(byUser, r.user_id, g, v);
+      const ck = l.line_type==='mileage'?'Mileage':(cats.find(x=>x.id===l.category_id)?.name||'Uncategorised'); bump(byCat, ck, g, v);
+      const dk = depts.find(d=>d.id===owner?.department_id)?.name||'Unassigned'; bump(byDept, dk, g, v);
     });
   });
-  const tbl = (obj, kind, fmtKey) => Object.entries(obj).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr class="clickable" onclick="drillAgg('${kind}','${encodeURIComponent(k)}')"><td>${esc(fmtKey?fmtKey(k):k)}</td><td class="num">${fmtMoney(v)}</td><td>›</td></tr>`).join('')||'<tr><td colspan="3" class="muted">No data</td></tr>';
+  const tbl = (obj, kind, fmtKey) => Object.entries(obj).sort((a,b)=>b[1].gross-a[1].gross).map(([k,o])=>
+    `<tr class="clickable" onclick="drillAgg('${kind}','${encodeURIComponent(k)}')">
+      <td>${esc(fmtKey?fmtKey(k):k)}</td>
+      <td class="num">${fmtMoney(o.net)}</td><td class="num">${fmtMoney(o.vat)}</td><td class="num"><strong>${fmtMoney(o.gross)}</strong></td>
+      <td>›</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No data</td></tr>';
   setTopbar(`<button class="btn btn-accent" onclick="exportAllLines()">Export all expenses (Excel)</button>`);
   c.innerHTML = `
     <div class="stat-grid">
-      <div class="stat clickable" onclick="window._acStatus='';navigate('all-claims')"><div class="num">${fmtMoney(round2(gross))}</div><div class="lbl">Total spend (all reports)</div></div>
+      <div class="stat clickable" onclick="window._acStatus='';navigate('all-claims')"><div class="num">${fmtMoney(round2(gross-vat))}</div><div class="lbl">Total net spend</div></div>
       <div class="stat info"><div class="num">${fmtMoney(round2(vat))}</div><div class="lbl">Total VAT</div></div>
+      <div class="stat clickable" onclick="window._acStatus='';navigate('all-claims')"><div class="num">${fmtMoney(round2(gross))}</div><div class="lbl">Total gross</div></div>
       <div class="stat ok clickable" onclick="window._acStatus='';navigate('all-claims')"><div class="num">${reports.length}</div><div class="lbl">Reports</div></div>
-      <div class="stat clickable" onclick="exportAllLines()"><div class="num">${allLines.length}</div><div class="lbl">Expense lines · export</div></div>
     </div>
     <div class="muted small" style="margin-bottom:12px">Tip: click any row below to see the underlying expense lines, then click a line to open the report.</div>
     <div class="form-row">
       <div class="card"><div class="card-head"><h3>Spend by employee</h3><button class="btn btn-sm btn-outline" onclick="exportAgg('user')">Excel</button></div>
-        <div class="table-wrap"><table><thead><tr><th>Employee</th><th class="num">Spend</th><th></th></tr></thead><tbody>${tbl(byUser,'user',userName)}</tbody></table></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Employee</th><th class="num">Net</th><th class="num">VAT</th><th class="num">Gross</th><th></th></tr></thead><tbody>${tbl(byUser,'user',userName)}</tbody></table></div></div>
       <div class="card"><div class="card-head"><h3>Spend by category</h3><button class="btn btn-sm btn-outline" onclick="exportAgg('cat')">Excel</button></div>
-        <div class="table-wrap"><table><thead><tr><th>Category</th><th class="num">Spend</th><th></th></tr></thead><tbody>${tbl(byCat,'cat')}</tbody></table></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Category</th><th class="num">Net</th><th class="num">VAT</th><th class="num">Gross</th><th></th></tr></thead><tbody>${tbl(byCat,'cat')}</tbody></table></div></div>
     </div>
     <div class="card"><div class="card-head"><h3>Spend by department</h3><button class="btn btn-sm btn-outline" onclick="exportAgg('dept')">Excel</button></div>
-      <div class="table-wrap"><table><thead><tr><th>Department</th><th class="num">Spend</th><th></th></tr></thead><tbody>${tbl(byDept,'dept')}</tbody></table></div></div>`;
+      <div class="table-wrap"><table><thead><tr><th>Department</th><th class="num">Net</th><th class="num">VAT</th><th class="num">Gross</th><th></th></tr></thead><tbody>${tbl(byDept,'dept')}</tbody></table></div></div>`;
   window._agg = { byUser, byCat, byDept };
 }
 async function drillAgg(kind, encKey){
@@ -1443,18 +1497,29 @@ async function drillAgg(kind, encKey){
     if(kind==='dept'){ const dk=depts.find(d=>d.id===owner?.department_id)?.name||'Unassigned'; return dk===key; }
     return false; };
   const ls = lines.filter(match).sort((a,b)=>(b.line_date||'').localeCompare(a.line_date||''));
-  let gross=0; const rowsHtml = ls.map(l=>{ const r=rById[l.report_id]||{}; gross+=Number(l.amount)||0;
-    return `<tr class="clickable" onclick="closeModal();openReport('${r.id}')"><td>${fmtDate(l.line_date)}</td><td>${esc(r.title||'')}</td><td>${esc(userName(r.user_id))}</td><td>${l.line_type==='mileage'?'Mileage: '+esc(l.postcode_from)+'→'+esc(l.postcode_to):esc(nameById(sups,l.supplier_id))}</td><td class="num">${fmtMoney(l.amount)}</td><td>›</td></tr>`; }).join('');
+  let gross=0, vat=0;
+  const rowsHtml = ls.map(l=>{ const r=rById[l.report_id]||{}; const g=Number(l.amount)||0; const v=Number(l.vat_amount)||0; gross+=g; vat+=v;
+    return `<tr class="clickable" onclick="closeModal();openReport('${r.id}')"><td>${fmtDate(l.line_date)}</td><td>${esc(r.title||'')}</td><td>${esc(userName(r.user_id))}</td><td>${l.line_type==='mileage'?'Mileage: '+esc(l.postcode_from)+'→'+esc(l.postcode_to):esc(nameById(sups,l.supplier_id))}</td>
+      <td class="num">${fmtMoney(g-v)}</td><td class="num">${fmtMoney(v)}</td><td class="num"><strong>${fmtMoney(g)}</strong></td><td>›</td></tr>`; }).join('');
   const title = kind==='user'?userName(key):key;
-  openModal(`<h2>${esc(title)}</h2><div class="modal-sub">${ls.length} line(s) · ${fmtMoney(round2(gross))} total</div>
-    <div class="table-wrap"><table><thead><tr><th>Date</th><th>Report</th><th>Employee</th><th>Detail</th><th class="num">Amount</th><th></th></tr></thead><tbody>${rowsHtml||'<tr><td colspan="6" class="muted">No lines.</td></tr>'}</tbody></table></div>
+  openModal(`<h2>${esc(title)}</h2><div class="modal-sub">${ls.length} line(s) · Net ${fmtMoney(round2(gross-vat))} · VAT ${fmtMoney(round2(vat))} · Gross ${fmtMoney(round2(gross))}</div>
+    <div class="table-wrap"><table><thead><tr><th>Date</th><th>Report</th><th>Employee</th><th>Detail</th><th class="num">Net</th><th class="num">VAT</th><th class="num">Gross</th><th></th></tr></thead><tbody>${rowsHtml||'<tr><td colspan="8" class="muted">No lines.</td></tr>'}</tbody></table></div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Close</button></div>`, true);
 }
 function exportAgg(which){
   const a = window._agg||{};
-  if(which==='user') downloadExcel('spend_by_employee.xls','ByEmployee',['Employee','Spend (£)'], Object.entries(a.byUser).sort((x,y)=>y[1]-x[1]).map(([k,v])=>[userName(k),v.toFixed(2)]),'Spend by employee');
-  if(which==='cat') downloadExcel('spend_by_category.xls','ByCategory',['Category','Spend (£)'], Object.entries(a.byCat).sort((x,y)=>y[1]-x[1]).map(([k,v])=>[k,v.toFixed(2)]),'Spend by category');
-  if(which==='dept') downloadExcel('spend_by_department.xls','ByDept',['Department','Spend (£)'], Object.entries(a.byDept).sort((x,y)=>y[1]-x[1]).map(([k,v])=>[k,v.toFixed(2)]),'Spend by department');
+  const map = which==='user' ? a.byUser : which==='cat' ? a.byCat : a.byDept;
+  if (!map) return;
+  const keyLabel = which==='user' ? 'Employee' : which==='cat' ? 'Category' : 'Department';
+  const fmtKey = which==='user' ? userName : (k=>k);
+  const rows = Object.entries(map).sort((x,y)=>y[1].gross-x[1].gross)
+    .map(([k,o])=>[fmtKey(k), o.net.toFixed(2), o.vat.toFixed(2), o.gross.toFixed(2)]);
+  // total row
+  const tot = Object.values(map).reduce((s,o)=>({net:s.net+o.net,vat:s.vat+o.vat,gross:s.gross+o.gross}),{net:0,vat:0,gross:0});
+  rows.push(['TOTAL', tot.net.toFixed(2), tot.vat.toFixed(2), tot.gross.toFixed(2)]);
+  const titles = { user:'Spend by employee', cat:'Spend by category', dept:'Spend by department' };
+  const files = { user:'spend_by_employee.xls', cat:'spend_by_category.xls', dept:'spend_by_department.xls' };
+  downloadExcel(files[which], 'Spend', [keyLabel,'Net (£)','VAT (£)','Gross (£)'], rows, titles[which]);
 }
 async function exportAllLines(){
   const reports = await idbGetAll('reports'); const rById={}; reports.forEach(r=>rById[r.id]=r);
@@ -1608,6 +1673,36 @@ async function resetPwd(id){
 }
 
 // ═══════════════════════════════════════════════
+// HOVER PREVIEW for receipt thumbnails
+// ═══════════════════════════════════════════════
+function setupReceiptHoverPreview(){
+  if (document.getElementById('receipt-preview')) return;
+  const el = document.createElement('div'); el.id='receipt-preview';
+  el.style.cssText='position:fixed;display:none;z-index:3000;pointer-events:none;background:#fff;box-shadow:0 12px 30px rgba(0,0,0,.3);padding:6px;border-radius:10px;max-width:520px;max-height:520px';
+  document.body.appendChild(el);
+  const place = e => {
+    const W=520, H=520;
+    let x = e.clientX + 18, y = e.clientY + 18;
+    if (x + W > innerWidth) x = Math.max(8, e.clientX - W - 18);
+    if (y + H > innerHeight) y = Math.max(8, innerHeight - H - 8);
+    el.style.left = x+'px'; el.style.top = y+'px';
+  };
+  document.addEventListener('mouseover', e => {
+    const t = e.target.closest && e.target.closest('.receipt-thumb'); if(!t) return;
+    const src = t.dataset.previewSrc, mime = t.dataset.previewMime||'';
+    if (!src || !mime.startsWith('image/')) return;   // PDFs don't get a hover preview
+    el.innerHTML = `<img src="${src}" style="max-width:500px;max-height:500px;display:block;border-radius:6px">`;
+    el.style.display = 'block'; place(e);
+  });
+  document.addEventListener('mousemove', e => { if (el.style.display==='block') place(e); });
+  document.addEventListener('mouseout', e => {
+    const t = e.target.closest && e.target.closest('.receipt-thumb'); if(!t) return;
+    const to = e.relatedTarget; if (to && t.contains(to)) return;
+    el.style.display='none'; el.innerHTML='';
+  });
+}
+
+// ═══════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════
 (async function init(){
@@ -1615,6 +1710,7 @@ async function resetPwd(id){
     await openDB();
     await seedDefaults();
     await ensureMileageModelV3();
+    setupReceiptHoverPreview();
     const sid = sessionStorage.getItem('exp_session');
     if (sid){ const u = await idbGet('users', sid); if (u && u.active){ state.user = u; await enterApp(); } }
   } catch(err){ console.error('Init failed', err); toast('Failed to start: '+err.message,'error'); }
