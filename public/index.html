@@ -871,6 +871,10 @@ async function openReport(id){
   const financeEditing = isFinance() && !ownerEditable && !isLocked;   // finance may edit any claim until it's locked
   const editable = !isLocked && (ownerEditable || isFinance());
   const isCCt = r.type==='creditcard';
+  // Quick-approve from the report detail: finance when awaiting_finance, or the assigned manager when awaiting_manager
+  const canFinanceApprove = isFinance() && r.status === 'awaiting_finance';
+  const canManagerApprove = isManager() && r.status === 'awaiting_manager' && state.usersById[r.user_id]?.approver1_id === state.user.id;
+  const approveStage = canFinanceApprove ? 'finance' : (canManagerApprove ? 'manager' : null);
   const cats = await ref('categories'); const sups = await refAll('suppliers'); const vts = await ref('vehicle_types'); const vats = await refAll('vat_rates'); const mrs = await refAll('mileage_rates');
   const catName = id2 => cats.find(c=>c.id===id2)?.name || '—';
   const supName = id2 => sups.find(s=>s.id===id2)?.name || '—';
@@ -922,6 +926,7 @@ async function openReport(id){
       ${ownerEditable ? `<button class="btn btn-success" onclick="submitReport('${r.id}')" ${t.count?'':'disabled'}>Submit for approval</button>`:''}
       ${editable ? `<button class="btn btn-outline" onclick="renameReport('${r.id}')">Rename</button>
       <button class="btn btn-danger" onclick="deleteReport('${r.id}')">Delete report</button>`:''}
+      ${approveStage ? `<button class="btn btn-success" onclick="approveReport('${r.id}','${approveStage}')">Approve</button>`:''}
       <button class="btn btn-info" style="margin-left:auto" onclick="exportReport('${r.id}')">Export to Excel</button>
     </div></div>`);
 }
