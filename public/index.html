@@ -1647,13 +1647,20 @@ async function renderPaymentRuns(c){
         || '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">No payment runs yet.</td></tr>'}
       </tbody></table></div></div>`;
 }
+// Format PR-YYYYMMDD-NN — suffix is a 2-digit sequence that resets each day
+async function nextPaymentRunReference(){
+  const datePart = new Date().toISOString().slice(0,10).replace(/-/g,'');
+  const prefix = `PR-${datePart}-`;
+  const usedToday = (await idbGetAll('payment_runs')).filter(r => String(r.reference||'').startsWith(prefix)).length;
+  return `${prefix}${String(usedToday + 1).padStart(2,'0')}`;
+}
 async function createPaymentRun(){
   const reports = await idbGetAll('reports');
   const due = [];
   for (const r of reports){ if (r.type==='expense' && r.status==='awaiting_reimbursement'){ r._t=lineTotals(await reportLines(r.id)); due.push(r); } }
   if(!due.length){ toast('Nothing to pay','error'); return; }
   const total = round2(due.reduce((s,r)=>s+r._t.gross,0));
-  const ref = 'PR-'+new Date().toISOString().slice(0,10).replace(/-/g,'')+'-'+Math.floor(Math.random()*900+100);
+  const ref = await nextPaymentRunReference();
   openModal(`<h2>Create payment run</h2><div class="modal-sub">${due.length} report(s) · ${fmtMoney(total)}</div>
     <div class="form-row"><div class="form-group"><label>Reference</label><input id="pr-ref" value="${ref}"></div>
       <div class="form-group"><label>Payment date</label><input type="date" id="pr-date" value="${today()}"></div></div>
@@ -1670,7 +1677,8 @@ async function confirmPaymentRun(){
   const total = round2(due.reduce((s,r)=>s+r._t.gross,0));
   const runId = uuid();
   const runDate = val('pr-date') || today();
-  await idbPut('payment_runs',{ id:runId, reference:val('pr-ref')||('PR-'+today().replace(/-/g,'')), run_date:runDate, created_by:state.user.id, total, status:'completed', notes:'', report_ids: due.map(r=>r.id), created_at:nowISO() });
+  const reference = val('pr-ref') || await nextPaymentRunReference();
+  await idbPut('payment_runs',{ id:runId, reference, run_date:runDate, created_by:state.user.id, total, status:'completed', notes:'', report_ids: due.map(r=>r.id), created_at:nowISO() });
   for (const r of due){ r.status='reimbursed'; r.reimbursed_at=runDate; r.payment_run_id=runId; await idbPut('reports', r); }
   await logAction('payment_run',{ run_id:runId, count:due.length, total });
   closeModal(); toast(`Payment run created — ${due.length} report(s) reimbursed`); navigate('payment-runs');
