@@ -1794,13 +1794,14 @@ async function renderGlReport(c){
   const monthStart = td.slice(0,7) + '-01';
   const from = window._glFrom || monthStart;
   const to   = window._glTo   || td;
+  const typeFilter = ['expense','creditcard'].includes(window._glType) ? window._glType : '';
 
   const reports = await idbGetAll('reports');
   const allLines = await idbGetAll('lines');
   const linesByReport = {}; allLines.forEach(l => (linesByReport[l.report_id] = linesByReport[l.report_id] || []).push(l));
   const cats = await refAll('categories'); const depts = await refAll('departments'); const sups = await refAll('suppliers'); const vats = await refAll('vat_rates');
   const mileageCat = cats.find(c => c.name === 'Mileage');
-  const inRange = reports.filter(r => r.finance_approved_at && r.finance_approved_at.slice(0,10) >= from && r.finance_approved_at.slice(0,10) <= to);
+  const inRange = reports.filter(r => r.finance_approved_at && r.finance_approved_at.slice(0,10) >= from && r.finance_approved_at.slice(0,10) <= to && (!typeFilter || r.type === typeFilter));
 
   const rows = [];
   for (const r of inRange){
@@ -1830,14 +1831,19 @@ async function renderGlReport(c){
     }
   }
   const totals = rows.reduce((s,x)=>({net:s.net+x.net, vat:s.vat+x.vat, gross:s.gross+x.gross}), {net:0,vat:0,gross:0});
-  window._glRows = rows; window._glRange = { from, to };
+  window._glRows = rows; window._glRange = { from, to, type: typeFilter };
 
   setTopbar(`<button class="btn btn-accent" onclick="exportGlReport()">Export to Excel</button>`);
   c.innerHTML = `
-    <div class="card"><p class="small muted" style="margin-bottom:8px">All claim lines whose <strong>finance approval date</strong> falls in the chosen range — including the employee's department code and the category's nominal code, so the journal can be posted into the ERP. Includes <strong>expense</strong> and <strong>credit-card</strong> claims.</p>
+    <div class="card"><p class="small muted" style="margin-bottom:8px">All claim lines whose <strong>finance approval date</strong> falls in the chosen range — including the employee's department code and the category's nominal code, so the journal can be posted into the ERP.</p>
       <div class="toolbar">
         <label class="small muted">From</label><input type="date" id="gl-from" value="${from}" onchange="window._glFrom=this.value;navigate('gl-report')">
         <label class="small muted">To</label><input type="date" id="gl-to" value="${to}" onchange="window._glTo=this.value;navigate('gl-report')">
+        <label class="small muted">Type</label><select id="gl-type" onchange="window._glType=this.value;navigate('gl-report')">
+          <option value="" ${typeFilter===''?'selected':''}>All</option>
+          <option value="expense" ${typeFilter==='expense'?'selected':''}>Expense</option>
+          <option value="creditcard" ${typeFilter==='creditcard'?'selected':''}>Credit Card</option>
+        </select>
         <span class="grow small muted">${rows.length} line(s) across ${inRange.length} report(s)</span>
       </div>
     </div>
@@ -1871,7 +1877,8 @@ function exportGlReport(){
   const exRows = rows.map(x => [x.ref, x.type, x.approved_at, x.employee, x.department, x.dept_code, x.line_date, x.detail, x.category, x.nominal, x.vat_rate, x.net.toFixed(2), x.vat.toFixed(2), x.gross.toFixed(2), x.description, x.vehicle, x.reg, x.miles, x.status]);
   const totals = rows.reduce((s,x)=>({net:s.net+x.net, vat:s.vat+x.vat, gross:s.gross+x.gross}), {net:0,vat:0,gross:0});
   exRows.push(['','','','','','','','','','','TOTAL', totals.net.toFixed(2), totals.vat.toFixed(2), totals.gross.toFixed(2), '','','','','']);
-  downloadExcel(`GL_${range.from||''}_to_${range.to||''}.xls`, 'GL', headers, exRows, `GL report — ${range.from} to ${range.to}`);
+  const typeLabel = range.type === 'expense' ? 'Expense' : range.type === 'creditcard' ? 'CreditCard' : 'All';
+  downloadExcel(`GL_${typeLabel}_${range.from||''}_to_${range.to||''}.xls`, 'GL', headers, exRows, `GL report (${typeLabel}) — ${range.from} to ${range.to}`);
 }
 
 // ═══════════════════════════════════════════════
