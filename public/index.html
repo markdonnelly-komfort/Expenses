@@ -866,8 +866,10 @@ async function openReport(id){
   const owner = state.usersById[r.user_id];
   const isOwner = r.user_id === state.user.id;
   const ownerEditable = isOwner && (r.status==='unsubmitted' || r.status==='rejected');
-  const financeEditing = isFinance() && !ownerEditable;   // finance may edit any claim at any stage
-  const editable = ownerEditable || isFinance();
+  // Once a report has reached its terminal state it is locked from further amendment by anyone.
+  const isLocked = (r.type==='creditcard' && r.status==='approved') || (r.type==='expense' && r.status==='reimbursed');
+  const financeEditing = isFinance() && !ownerEditable && !isLocked;   // finance may edit any claim until it's locked
+  const editable = !isLocked && (ownerEditable || isFinance());
   const isCCt = r.type==='creditcard';
   const cats = await ref('categories'); const sups = await refAll('suppliers'); const vts = await ref('vehicle_types'); const vats = await refAll('vat_rates'); const mrs = await refAll('mileage_rates');
   const catName = id2 => cats.find(c=>c.id===id2)?.name || '—';
@@ -899,6 +901,7 @@ async function openReport(id){
 
   c_html(`
     ${r.status==='rejected' ? `<div class="card" style="border-left:5px solid var(--danger)"><strong style="color:var(--danger)">Returned for changes</strong><div class="small">${esc(r.rejection_note)||'No note provided.'} — please amend and resubmit.</div></div>`:''}
+    ${isLocked ? `<div class="card" style="border-left:5px solid var(--success)"><strong style="color:var(--success)">🔒 Locked</strong><div class="small">This ${isCCt?'credit-card':'expense'} report has been ${isCCt?'fully approved':'reimbursed'} and is now locked from further amendment.</div></div>` : ''}
     ${financeEditing ? `<div class="card" style="border-left:5px solid var(--info)"><strong style="color:var(--info)">Finance edit mode</strong><div class="small">You are editing ${esc(owner?.full_name||'this employee')}'s claim (status: ${STATUS_META[r.status]?.label||r.status}). Changes are saved immediately and do not change the approval status.</div></div>`:''}
     ${dupBanner}
     <div class="totbar">
