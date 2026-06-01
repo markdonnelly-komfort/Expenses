@@ -332,7 +332,7 @@ async function seedDefaults(){
   await u(financeId,'finance','admin123','Helen Foster','h.foster@komfort.com',['employee','manager','finance','credit_card'],finDept,null,null);
   await u(managerId,'manager','manager123','Sarah Mitchell','s.mitchell@komfort.com',['employee','manager','credit_card'],opsDept,null,financeId);
   await u(empId,'employee','employee123','James Okafor','j.okafor@komfort.com',['employee'],opsDept,managerId,financeId);
-  await u(ccId,'ccuser','ccuser123','Priya Sharma','p.sharma@komfort.com',['employee','credit_card'],salDept,managerId,financeId);
+  await u(ccId,'ccuser','ccuser123','Priya Sharma','p.sharma@komfort.com',['credit_card'],salDept,managerId,financeId);
 
   // Sample report with one expense + one mileage line (unsubmitted, owned by employee)
   const rptId = uuid();
@@ -383,6 +383,17 @@ async function ensureMileageModelV3(){
   await seedMileageCategoriesAndRates();
   await setSetting('mileage_model','v3');
 }
+// One-shot demo migration: original seed gave ccuser ['employee','credit_card']; new seed is ['credit_card']
+// only. Update existing local DBs once, unless an admin has already changed the roles.
+async function migrateDemoCcuserRoles(){
+  if (await getSetting('ccuser_role_fixed') === '1') return;
+  const cc = (await idbGetAll('users')).find(u => u.username === 'ccuser');
+  if (cc && cc.roles?.length === 2 && cc.roles.includes('employee') && cc.roles.includes('credit_card')){
+    cc.roles = ['credit_card'];
+    await idbPut('users', cc);
+  }
+  await setSetting('ccuser_role_fixed', '1');
+}
 // Pick the rate for a category that is in force on the claim date (latest effective_from <= date)
 async function findApplicableRate(category, claimDate){
   const rates = (await idbGetAll('mileage_rates')).filter(r => r.active!==0 && r.vehicle_type===category && (!r.effective_from || r.effective_from <= claimDate));
@@ -399,6 +410,7 @@ function hasRole(role, user){ return ((user||state.user)?.roles||[]).includes(ro
 function isFinance(){ return hasRole('finance'); }
 function isManager(){ return hasRole('manager'); }
 function isCC(){ return hasRole('credit_card'); }
+function isEmployee(){ return hasRole('employee'); }
 
 async function handleLogin(e){
   e.preventDefault();
@@ -421,7 +433,10 @@ async function enterApp(){
   document.getElementById('who-name').textContent = state.user.full_name;
   document.getElementById('who-role').textContent = state.user.roles.map(r=>ROLES.find(x=>x.key===r)?.label||r).join(' · ');
   await buildNav();
-  navigate(isFinance() ? 'dashboard' : 'my-expenses');
+  // Land on the first relevant page for this user's roles
+  const items = navItems();
+  const start = isFinance() ? 'dashboard' : (items[0]?.id || 'dashboard');
+  navigate(start);
   if (state.user.must_change_password) changePassword(true);
 }
 function logout(){
@@ -466,9 +481,9 @@ async function refreshCaches(){
 function navItems(){
   const items = [];
   if (isFinance()) items.push({ id:'dashboard', label:'Dashboard', ic:'▦' });
-  items.push({ id:'my-expenses', label:'My Expenses', ic:'£', sec:'Mine' });
-  if (isCC()) items.push({ id:'my-cc', label:'Credit Card', ic:'▭' });
-  items.push({ id:'my-mileage', label:'My Mileage', ic:'⛽', onclick:"window._mtUser=undefined;navigate('my-mileage')" });
+  if (isEmployee()) items.push({ id:'my-expenses', label:'My Expenses', ic:'£', sec:'Mine' });
+  if (isCC()) items.push({ id:'my-cc', label:'Credit Card', ic:'▭', sec: isEmployee() ? undefined : 'Mine' });
+  if (isEmployee()) items.push({ id:'my-mileage', label:'My Mileage', ic:'⛽', onclick:"window._mtUser=undefined;navigate('my-mileage')" });
   if (isManager()) items.push({ id:'approvals', label:'Approvals', ic:'✔', badge:'mgr', sec:'Approve' });
   if (isFinance()){
     items.push({ id:'finance-approvals', label:'Finance Approvals', ic:'✔', badge:'fin', sec:'Finance' });
@@ -610,6 +625,47 @@ function lineTotals(lines){
   let gross=0, vat=0, miles=0;
   lines.forEach(l=>{ gross+=Number(l.amount)||0; vat+=Number(l.vat_amount)||0; if(l.line_type==='mileage') miles+=Number(l.distance_miles)||0; });
   return { gross:round2(gross), vat:round2(vat), net:round2(gross-vat), miles:round2(miles), count:lines.length };
+}
+
+// ── Duplicate-claim detection (warning only — never blocks submit/approval) ──
+// Expense lines are flagged when same employee + date + supplier + amount.
+// Mileage lines are flagged when same employee + date + both postcodes + distance.
+function _isDuplicate(a, b){
+  if (a.line_type !== b.line_type) return false;
+  if (a.line_date !== b.line_date) return false;
+  if (a.line_type === 'expense'){
+    return !!a.supplier_id && a.supplier_id === b.supplier_id && Math.abs(Number(a.amount||0) - Number(b.amount||0)) < 0.01;
+  }
+  return !!a.postcode_from && a.postcode_from === b.postcode_from && a.postcode_to === b.postcode_to
+         && Math.abs(Number(a.distance_miles||0) - Number(b.distance_miles||0)) < 1;
+}
+async function findDuplicateMatch(line, ownerId){
+  const reports = await idbByIndex('reports', 'user_id', ownerId);
+  for (const r of reports){
+    for (const l of await idbByIndex('lines', 'report_id', r.id)){
+      if (l.id === line.id) continue;
+      if (_isDuplicate(line, l)) return { line:l, report:r };
+    }
+  }
+  return null;
+}
+async function findDuplicatesFor(targetLines, ownerId){
+  const reports = await idbByIndex('reports', 'user_id', ownerId);
+  const all = [];
+  for (const r of reports) for (const l of await idbByIndex('lines', 'report_id', r.id)) all.push({ l, r });
+  const out = new Map();
+  for (const t of targetLines){
+    for (const { l, r } of all){
+      if (l.id === t.id) continue;
+      if (_isDuplicate(t, l)){ out.set(t.id, { line:l, report:r }); break; }
+    }
+  }
+  return out;
+}
+function dupBadge(dup){
+  if (!dup) return '';
+  const where = `Possible duplicate of a ${dup.line.line_type} dated ${fmtDate(dup.line.line_date)} in “${dup.report.title}”`;
+  return `<span class="badge b-amber" title="${esc(where).replace(/"/g,'&quot;')}" style="margin-left:6px">⚠ Duplicate?</span>`;
 }
 
 // ── Tax year (UK: 6 April – 5 April) + mileage tracking ──
@@ -788,26 +844,30 @@ async function openReport(id){
   document.getElementById('page-title').textContent = r.title;
   setTopbar(`<button class="btn btn-outline btn-sm" onclick="navigate('${isCCt?'my-cc':'my-expenses'}')">‹ Back</button>`);
 
+  const dups = await findDuplicatesFor(lines, r.user_id);
   const lineRows = lines.map(l=>{
+    const dup = dupBadge(dups.get(l.id));
     if (l.line_type==='mileage'){
-      return `<tr><td>${fmtDate(l.line_date)}</td><td><span class="badge b-blue">Mileage</span>${l.company_car?'<div class="small muted" style="margin-top:2px">Company car</div>':''}</td>
-        <td>${esc(l.postcode_from)} → ${esc(l.postcode_to)}<div class="small muted">${esc(l.description)||''} ${l.vehicle_reg?'· '+esc(l.vehicle_reg):''}</div></td>
+      return `<tr><td>${fmtDate(l.line_date)}</td><td><span class="badge b-blue">Mileage</span>${dup}${l.company_car?'<div class="small muted" style="margin-top:2px">Company car</div>':''}${l.return_journey?'<div class="small muted">Return</div>':''}</td>
+        <td>${esc(l.postcode_from)} → ${esc(l.postcode_to)}${l.return_journey?' <span class="muted small">(return)</span>':''}<div class="small muted">${esc(l.description)||''} ${l.vehicle_reg?'· '+esc(l.vehicle_reg):''}</div></td>
         <td>${esc(l.vehicle_type)}<div class="small muted">${esc(mileageRateDesc(l))}</div></td>
         <td class="num">${fmtMoney(l.vat_amount)}</td><td class="num"><strong>${fmtMoney(l.amount)}</strong></td>
         <td>${receiptCountBadge(l)}</td>
         <td>${editable?`<button class="btn btn-sm btn-outline" onclick="editLine('${l.id}')">Edit</button> <button class="btn btn-sm btn-danger" onclick="deleteLine('${l.id}')">×</button>`:''}</td></tr>`;
     }
-    return `<tr><td>${fmtDate(l.line_date)}</td><td><span class="badge b-yellow">Expense</span></td>
+    return `<tr><td>${fmtDate(l.line_date)}</td><td><span class="badge b-yellow">Expense</span>${dup}</td>
       <td>${esc(supName(l.supplier_id))}<div class="small muted">${esc(l.description)||''}</div></td>
       <td>${esc(catName(l.category_id))}<div class="small muted">${esc(vatName(l.vat_rate_id))}</div></td>
       <td class="num">${fmtMoney(l.vat_amount)}</td><td class="num"><strong>${fmtMoney(l.amount)}</strong></td>
       <td>${receiptCountBadge(l)}</td>
       <td>${editable?`<button class="btn btn-sm btn-outline" onclick="editLine('${l.id}')">Edit</button> <button class="btn btn-sm btn-danger" onclick="deleteLine('${l.id}')">×</button>`:''}</td></tr>`;
   }).join('') || `<tr><td colspan="8" class="muted" style="text-align:center;padding:24px">No expenses added yet.</td></tr>`;
+  const dupBanner = dups.size ? `<div class="card" style="border-left:5px solid var(--warning)"><strong style="color:var(--warning)">⚠ ${dups.size} possible duplicate${dups.size>1?'s':''}</strong><div class="small">One or more lines below look like they may already exist in another claim. This is only a warning — you can still submit and approve.</div></div>` : '';
 
   c_html(`
     ${r.status==='rejected' ? `<div class="card" style="border-left:5px solid var(--danger)"><strong style="color:var(--danger)">Returned for changes</strong><div class="small">${esc(r.rejection_note)||'No note provided.'} — please amend and resubmit.</div></div>`:''}
     ${financeEditing ? `<div class="card" style="border-left:5px solid var(--info)"><strong style="color:var(--info)">Finance edit mode</strong><div class="small">You are editing ${esc(owner?.full_name||'this employee')}'s claim (status: ${STATUS_META[r.status]?.label||r.status}). Changes are saved immediately and do not change the approval status.</div></div>`:''}
+    ${dupBanner}
     <div class="totbar">
       <div class="t"><div class="v">${fmtMoney(t.gross)}</div><div class="l">Total claim</div></div>
       <div class="t"><div class="v">${fmtMoney(t.net)}</div><div class="l">Net</div></div>
@@ -951,7 +1011,20 @@ async function saveExpenseLine(id){
     postcode_from:'', postcode_to:'', distance_miles:0, vehicle_type:'', vehicle_reg:'', mileage_rate_id:'',
     receipts: _lineReceipts, created_at: nowISO()
   };
-  await idbPut('lines', line); closeModal(); openReport(state.currentReportId);
+  await idbPut('lines', line);
+  await warnIfDuplicate(line);
+  closeModal(); openReport(state.currentReportId);
+}
+
+// Show a non-blocking warning toast if this line looks like a duplicate of another one already saved
+async function warnIfDuplicate(line){
+  const report = await idbGet('reports', line.report_id);
+  if (!report) return;
+  const dup = await findDuplicateMatch(line, report.user_id);
+  if (!dup) return;
+  const what = line.line_type === 'mileage' ? 'mileage claim' : 'expense';
+  const where = dup.report.id === report.id ? 'in this report' : `in “${dup.report.title}”`;
+  toast(`⚠ Possible duplicate ${what} dated ${fmtDate(line.line_date)} ${where} — saved anyway, please verify.`, 'info');
 }
 
 // ── Mileage line ──
@@ -973,6 +1046,8 @@ async function openMileageLineModal(line){
       <div class="form-group"><label class="req">Distance (miles)</label><input type="number" step="0.1" id="ml-dist" value="${line?.distance_miles||''}" oninput="recalcMileage()">
         <button type="button" class="btn btn-sm btn-outline" style="margin-top:6px" onclick="estimateDistance()">↻ Estimate from postcodes</button></div>
     </div>
+    <label class="chk" style="margin-bottom:12px"><input type="checkbox" id="ml-return" ${line?.return_journey?'checked':''}> Return journey
+      <span class="muted small" style="font-weight:400">— doubles the distance when estimating from postcodes</span></label>
     <div class="form-group"><label class="req">Mileage rate category</label><select id="ml-cat" onchange="recalcMileage()">${catOpts}</select></div>
     <div class="form-row-3">
       <div class="form-group"><label>Approved ≤10,000 mi</label><input id="ml-rate-up" readonly style="background:var(--bg)"></div>
@@ -1041,10 +1116,12 @@ async function estimateDistance(){
     const t = await fetch('https://api.postcodes.io/postcodes/'+encodeURIComponent(b));
     const fj = await f.json(), tj = await t.json();
     if(fj.status!==200||tj.status!==200){ toast('Postcode not found — enter distance manually','error'); return; }
-    const d = haversine(fj.result.latitude,fj.result.longitude,tj.result.latitude,tj.result.longitude)*1.3; // road factor
+    let d = haversine(fj.result.latitude,fj.result.longitude,tj.result.latitude,tj.result.longitude)*1.3; // road factor
+    const isReturn = !!document.getElementById('ml-return')?.checked;
+    if (isReturn) d *= 2;
     document.getElementById('ml-dist').value = d.toFixed(1);
     recalcMileage();
-    toast('Estimated road distance — please verify');
+    toast(isReturn ? 'Estimated round-trip distance — please verify' : 'Estimated road distance — please verify');
   }catch(e){ toast('Could not estimate (offline?) — enter distance manually','error'); }
 }
 function haversine(lat1,lon1,lat2,lon2){ const R=3958.8, toR=x=>x*Math.PI/180; const dLat=toR(lat2-lat1),dLon=toR(lon2-lon1); const x=Math.sin(dLat/2)**2+Math.cos(toR(lat1))*Math.cos(toR(lat2))*Math.sin(dLon/2)**2; return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x)); }
@@ -1063,11 +1140,14 @@ async function saveMileageLine(id){
     postcode_from: val('ml-from'), postcode_to: val('ml-to'), distance_miles: dist,
     vehicle_type: val('ml-cat'), vehicle_reg: val('ml-reg'), mileage_rate_id: calc.rate.id,
     company_car: !!document.getElementById('ml-company')?.checked,
+    return_journey: !!document.getElementById('ml-return')?.checked,
     rate_up: Number(calc.rate.rate_pence), rate_over: Number(calc.rate.rate_over_pence), rate_adv: Number(calc.rate.afr_pence),
     miles_under: calc.under, miles_over: calc.over,
     receipts: _lineReceipts, created_at: nowISO()
   };
-  await idbPut('lines', line); closeModal(); openReport(state.currentReportId);
+  await idbPut('lines', line);
+  await warnIfDuplicate(line);
+  closeModal(); openReport(state.currentReportId);
 }
 
 // ── Receipt OCR (auto-scan) ──
@@ -1422,11 +1502,15 @@ async function openApproval(id, stage){
   const r = await idbGet('reports', id);
   const lines = (await reportLines(id)).sort((a,b)=>(a.line_date||'').localeCompare(b.line_date||''));
   const cats = await refAll('categories'); const sups = await refAll('suppliers'); const t = lineTotals(lines);
-  const rowsHtml = lines.map(l=>`<tr><td>${fmtDate(l.line_date)}</td><td>${l.line_type==='mileage'?'<span class="badge b-blue">Mileage</span>':'<span class="badge b-yellow">Expense</span>'}</td>
+  const dups = await findDuplicatesFor(lines, r.user_id);
+  const rowsHtml = lines.map(l=>{ const dup = dupBadge(dups.get(l.id));
+    return `<tr><td>${fmtDate(l.line_date)}</td><td>${l.line_type==='mileage'?'<span class="badge b-blue">Mileage</span>':'<span class="badge b-yellow">Expense</span>'}${dup}</td>
     <td>${l.line_type==='mileage'?esc(l.postcode_from)+' → '+esc(l.postcode_to):esc(nameById(sups,l.supplier_id))}<div class="small muted">${esc(l.description)||''}</div></td>
     <td>${l.line_type==='mileage'?esc(l.vehicle_type)+' · '+l.distance_miles+'mi':esc(nameById(cats,l.category_id))}</td>
-    <td class="num">${fmtMoney(l.vat_amount)}</td><td class="num">${fmtMoney(l.amount)}</td><td>${receiptCountBadge(l)}</td></tr>`).join('');
+    <td class="num">${fmtMoney(l.vat_amount)}</td><td class="num">${fmtMoney(l.amount)}</td><td>${receiptCountBadge(l)}</td></tr>`; }).join('');
+  const dupNotice = dups.size ? `<div class="scan-box" style="background:#fff3e0;border-color:var(--warning)"><strong>⚠ ${dups.size} possible duplicate${dups.size>1?'s':''}</strong> — review the flagged line${dups.size>1?'s':''} before approving. This is a warning only; you can still approve.</div>` : '';
   openModal(`<h2>${esc(r.title)}</h2><div class="modal-sub">${esc(userName(r.user_id))} · ${r.type==='creditcard'?'Credit card':'Expense'} · Total <strong>${fmtMoney(t.gross)}</strong> (VAT ${fmtMoney(t.vat)})</div>
+    ${dupNotice}
     <div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Detail</th><th>Category/Vehicle</th><th class="num">VAT</th><th class="num">Amount</th><th>Rcpt</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
     <div class="form-group" style="margin-top:14px"><label>Note (required if returning)</label><textarea id="ap-note" rows="2"></textarea></div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -1842,6 +1926,7 @@ function setupReceiptHoverPreview(){
     await openDB();
     await seedDefaults();
     await ensureMileageModelV3();
+    await migrateDemoCcuserRoles();
     setupReceiptHoverPreview();
     const sid = sessionStorage.getItem('exp_session');
     if (sid){ const u = await idbGet('users', sid); if (u && u.active){ state.user = u; await enterApp(); } }
