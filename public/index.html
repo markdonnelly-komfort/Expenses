@@ -597,7 +597,7 @@ function navItems(){
   if (isEmployee()) items.push({ id:'my-expenses', label:'My Expenses', ic:'£', sec:'Mine' });
   if (isCC()) items.push({ id:'my-cc', label:'Credit Card', ic:'▭', sec: isEmployee() ? undefined : 'Mine' });
   if (isEmployee()) items.push({ id:'my-mileage', label:'My Mileage', ic:'⛽', onclick:"window._mtUser=undefined;navigate('my-mileage')" });
-  if (isManager()) items.push({ id:'approvals', label:'Approvals', ic:'✔', badge:'mgr', sec:'Approve' });
+  if (isManager() || isFinance()) items.push({ id:'approvals', label:'Approvals', ic:'✔', badge:'mgr', sec:'Approve' });
   if (isFinance()){
     items.push({ id:'finance-approvals', label:'Finance Approvals', ic:'✔', badge:'fin', sec:'Finance' });
     items.push({ id:'all-claims', label:'All Claims', ic:'≡' });
@@ -632,12 +632,18 @@ async function buildNav(){
 }
 async function computeBadges(){
   const reports = await idbGetAll('reports');
-  let mgr = 0, fin = 0;
+  const fin = isFinance();
+  let mgrCount = 0, finCount = 0;
   reports.forEach(r => {
-    if (r.status==='awaiting_manager' && state.usersById[r.user_id]?.approver1_id === state.user.id) mgr++;
-    if (r.status==='awaiting_finance') fin++;
+    if (r.user_id === state.user.id) return;            // never approve your own
+    const owner = state.usersById[r.user_id];
+    if (r.status==='awaiting_manager'){
+      if (owner?.approver1_id === state.user.id || fin) mgrCount++;
+    } else if (r.status==='awaiting_finance'){
+      if (fin && r.manager_approved_by !== state.user.id) finCount++;
+    }
   });
-  return { mgr, fin };
+  return { mgr: mgrCount, fin: finCount };
 }
 const PAGE_TITLES = {
   dashboard:'Dashboard', 'my-expenses':'My Expense Reports', 'my-cc':'Company Credit Card', 'my-mileage':'My Mileage', 'mileage-all':'Mileage Tracker — All Employees', approvals:'Approvals',
@@ -1075,8 +1081,11 @@ async function openReport(id){
   const editable = !isLocked && (ownerEditable || isFinance());
   const isCCt = r.type==='creditcard';
   // Quick-approve from the report detail: finance when awaiting_finance, or the assigned manager when awaiting_manager
-  const canFinanceApprove = isFinance() && r.status === 'awaiting_finance';
-  const canManagerApprove = isManager() && r.status === 'awaiting_manager' && state.usersById[r.user_id]?.approver1_id === state.user.id;
+  const isOwnReport = r.user_id === state.user.id;
+  const canFinanceApprove = !isOwnReport && isFinance() && r.status === 'awaiting_finance' && r.manager_approved_by !== state.user.id;
+  const canManagerApprove = !isOwnReport && r.status === 'awaiting_manager' && (
+    state.usersById[r.user_id]?.approver1_id === state.user.id || isFinance()
+  );
   const approveStage = canFinanceApprove ? 'finance' : (canManagerApprove ? 'manager' : null);
   const cats = await ref('categories'); const sups = await refAll('suppliers'); const vts = await ref('vehicle_types'); const vats = await refAll('vat_rates'); const mrs = await refAll('mileage_rates');
   const catName = id2 => cats.find(c=>c.id===id2)?.name || '—';
@@ -1935,20 +1944,25 @@ async function exportMileageTracker(ty, userId){
 // ═══════════════════════════════════════════════
 async function renderApprovals(c){
   const reports = await idbGetAll('reports');
+  const fin = isFinance();
   const queue = []; const decided = [];
   for (const r of reports){
+    if (r.user_id === state.user.id) continue;          // never approve your own
     const owner = state.usersById[r.user_id];
-    if (owner?.approver1_id !== state.user.id) continue;
+    const canSee = (owner?.approver1_id === state.user.id) || fin;
+    if (!canSee) continue;
     r._t = lineTotals(await reportLines(r.id));
-    if (r.status==='awaiting_manager') queue.push(r); else if (r.manager_approved_by===state.user.id) decided.push(r);
+    if (r.status==='awaiting_manager') queue.push(r);
+    else if (r.manager_approved_by === state.user.id) decided.push(r);
   }
   c.innerHTML = `
-    <div class="card"><div class="card-head"><h3>Awaiting your approval (${queue.length})</h3></div>
+    <div class="card"><div class="card-head"><h3>Awaiting 1st approval (${queue.length})</h3>${fin?'<span class="small muted">Finance users can step in on any report at the 1st-approval stage.</span>':''}</div>
       <div class="table-wrap"><table><thead><tr><th>Report</th><th>Owner</th><th>Type</th><th>Submitted</th><th class="num">Total</th><th></th></tr></thead><tbody>
         ${queue.map(r=>`<tr><td class="clickable" onclick="openApproval('${r.id}','manager')"><strong>${esc(r.title)}</strong>${r.reference?`<div class="small muted">${esc(r.reference)}</div>`:''}</td>
           <td>${esc(userName(r.user_id))}</td><td>${r.type==='creditcard'?'Credit card':'Expense'}</td><td>${fmtDate(r.submitted_at)}</td>
           <td class="num">${fmtMoney(r._t.gross)}</td>
           <td><button class="btn btn-sm btn-success" onclick="openApproval('${r.id}','manager')">Review</button>
+          <button class="btn btn-sm btn-info" onclick="openDetailedReview('${r.id}','manager')">Detailed Review</button>
           <button class="btn btn-sm btn-outline" title="Print / Save as PDF" onclick="printableReport('${r.id}')">🖨</button></td></tr>`).join('')
         || '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Nothing awaiting your approval.</td></tr>'}
       </tbody></table></div></div>
@@ -1958,18 +1972,31 @@ async function renderApprovals(c){
 }
 async function renderFinanceApprovals(c){
   const reports = await idbGetAll('reports');
-  const queue = [];
-  for (const r of reports){ if (r.status==='awaiting_finance'){ r._t = lineTotals(await reportLines(r.id)); queue.push(r); } }
-  c.innerHTML = `<div class="card"><div class="card-head"><h3>Awaiting finance approval (${queue.length})</h3></div>
-    <div class="table-wrap"><table><thead><tr><th>Report</th><th>Owner</th><th>Type</th><th>Mgr approved</th><th class="num">Total</th><th></th></tr></thead><tbody>
+  const queue = []; const blocked = [];
+  for (const r of reports){
+    if (r.status !== 'awaiting_finance') continue;
+    r._t = lineTotals(await reportLines(r.id));
+    // Finance user can approve unless they are the owner OR they already did the 1st approval
+    if (r.user_id === state.user.id) { blocked.push({r, why:'own report'}); continue; }
+    if (r.manager_approved_by === state.user.id) { blocked.push({r, why:'you did the 1st approval'}); continue; }
+    queue.push(r);
+  }
+  c.innerHTML = `<div class="card"><div class="card-head"><h3>Awaiting 2nd (finance) approval (${queue.length})</h3>
+    <span class="small muted">A 2nd approval must be done by someone different from the 1st approver.</span></div>
+    <div class="table-wrap"><table><thead><tr><th>Report</th><th>Owner</th><th>Type</th><th>1st approved</th><th class="num">Total</th><th></th></tr></thead><tbody>
       ${queue.map(r=>`<tr><td class="clickable" onclick="openApproval('${r.id}','finance')"><strong>${esc(r.title)}</strong>${r.reference?`<div class="small muted">${esc(r.reference)}</div>`:''}</td>
         <td>${esc(userName(r.user_id))}</td><td>${r.type==='creditcard'?'Credit card':'Expense'}</td>
         <td>${r.manager_approved_at?userName(r.manager_approved_by):'<span class="muted">direct</span>'}</td>
         <td class="num">${fmtMoney(r._t.gross)}</td>
         <td><button class="btn btn-sm btn-success" onclick="openApproval('${r.id}','finance')">Review</button>
+        <button class="btn btn-sm btn-info" onclick="openDetailedReview('${r.id}','finance')">Detailed Review</button>
         <button class="btn btn-sm btn-outline" title="Print / Save as PDF" onclick="printableReport('${r.id}')">🖨</button></td></tr>`).join('')
-      || '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Nothing awaiting finance approval.</td></tr>'}
-    </tbody></table></div></div>`;
+      || '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Nothing awaiting your 2nd approval.</td></tr>'}
+    </tbody></table></div></div>
+    ${blocked.length?`<div class="card"><h3 style="margin-bottom:6px">Blocked from your approval (${blocked.length})</h3><div class="small muted" style="margin-bottom:8px">These reports are waiting for someone else to sign off.</div>
+      <div class="table-wrap"><table><tbody>
+      ${blocked.map(b=>`<tr class="clickable" onclick="openReport('${b.r.id}')"><td>${esc(b.r.title)} ${b.r.reference?`<span class="small muted">${esc(b.r.reference)}</span>`:''}</td><td>${esc(userName(b.r.user_id))}</td><td class="small muted">${esc(b.why)}</td><td class="num">${fmtMoney(b.r._t.gross)}</td></tr>`).join('')}
+      </tbody></table></div></div>`:''}`;
 }
 async function openApproval(id, stage){
   state.currentReportId = id;
@@ -1993,17 +2020,33 @@ async function openApproval(id, stage){
 }
 async function approveReport(id, stage){
   const r = await idbGet('reports', id);
-  const owner = state.usersById[r.user_id];
+  // Self-approval is never allowed
+  if (r.user_id === state.user.id){ toast('You cannot approve your own report','error'); return; }
+  // 1st and 2nd must be done by different people
+  if (stage === 'finance' && r.manager_approved_by === state.user.id){
+    toast('The 2nd approval must be a different person from the 1st approver','error'); return;
+  }
+  if (stage === 'manager' && r.finance_approved_by === state.user.id){
+    toast('The 1st approval must be a different person from the 2nd approver','error'); return;
+  }
   if (stage==='manager'){
     r.manager_approved_by = state.user.id; r.manager_approved_at = nowISO();
-    r.status = owner?.approver2_id ? 'awaiting_finance' : (r.type==='creditcard'?'approved':'awaiting_reimbursement');
-    if (r.status!=='awaiting_finance'){ r.finance_approved_by=state.user.id; r.finance_approved_at=nowISO(); }
+    // Always proceed to the 2nd (finance) stage so the same person never does both stages
+    r.status = 'awaiting_finance';
   } else {
     r.finance_approved_by = state.user.id; r.finance_approved_at = nowISO();
     r.status = r.type==='creditcard' ? 'approved' : 'awaiting_reimbursement';
   }
   await idbPut('reports', r); await logAction('report_approved',{report_id:id,stage});
   closeModal(); toast('Approved'); navigate(state.page);
+}
+// Open the first line of a report in the side-by-side line modal so a reviewer can step through with Prev/Next.
+async function openDetailedReview(reportId, stage){
+  const lines = (await reportLines(reportId)).sort((a,b)=>(a.line_date||'').localeCompare(b.line_date||''));
+  if (!lines.length){ toast('This report has no lines to review','error'); return; }
+  state.currentReportId = reportId;
+  if (stage) window._reviewStage = stage;
+  await editLine(lines[0].id);
 }
 async function rejectReport(id){
   const note = val('ap-note'); if(!note){ toast('Please add a note explaining what to change','error'); return; }
