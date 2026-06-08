@@ -1234,6 +1234,12 @@ async function openExpenseLineModal(line){
   // Read-only only applies when a Detailed Review was started by a non-finance user.
   // Add mode and regular Edit (via the line's Edit button) always remain editable.
   const canEdit = !editMode || !window._lineNav?.readOnly;
+  // Approve report button: shown when stepping through Detailed Review and you've reached the last line
+  // AND you're entitled to approve at the report's current stage.
+  const nav = window._lineNav;
+  const onLastLine = editMode && nav && nav.idx === nav.ids.length - 1;
+  const approveStageHere = onLastLine && state.currentReportId ? await approveStageFor(state.currentReportId) : null;
+  const approveBtn = approveStageHere ? `<button class="btn btn-success" onclick="approveFromDetailedReview('${state.currentReportId}','${approveStageHere}')">✓ Approve report</button>` : '';
   const formFields = `
     <div class="form-row"><div class="form-group"><label class="req">Date</label><input type="date" id="el-date" value="${line?.line_date||today()}"></div>
       <div class="form-group"><label>Supplier</label><select id="el-supplier">${supOpts}</select>
@@ -1253,8 +1259,10 @@ async function openExpenseLineModal(line){
       <button class="btn btn-outline" onclick="runReceiptScan()">⮌ Scan receipt</button>
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveExpenseLine('${line?.id||''}')">Save expense</button>
+      ${approveBtn}
     </div>` : `<div class="modal-actions">
-      <button class="btn btn-primary" onclick="closeModal()">Close</button>
+      <button class="btn btn-outline" onclick="closeModal()">Close</button>
+      ${approveBtn}
     </div>`;
   if (editMode){
     const formBlock = canEdit ? formFields : `<fieldset disabled style="border:none;padding:0;margin:0">${formFields}</fieldset>`;
@@ -1336,6 +1344,10 @@ async function openMileageLineModal(line){
   const companyChecked = line ? !!line.company_car : true;
   const editMode = !!line;
   const canEdit = !editMode || !window._lineNav?.readOnly;
+  const nav = window._lineNav;
+  const onLastLine = editMode && nav && nav.idx === nav.ids.length - 1;
+  const approveStageHere = onLastLine && state.currentReportId ? await approveStageFor(state.currentReportId) : null;
+  const approveBtn = approveStageHere ? `<button class="btn btn-success" onclick="approveFromDetailedReview('${state.currentReportId}','${approveStageHere}')">✓ Approve report</button>` : '';
   const formFields = `
     <div class="form-row"><div class="form-group"><label class="req">Date</label><input type="date" id="ml-date" value="${line?.line_date||today()}" onchange="recalcMileage()"></div>
       <div class="form-group"><label class="req">Vehicle reg</label><input id="ml-reg" value="${esc(line?.vehicle_reg||'')}" placeholder="e.g. YK19 ABC"></div></div>
@@ -1364,8 +1376,10 @@ async function openMileageLineModal(line){
         <button type="button" class="btn btn-sm btn-outline" style="border-color:rgba(255,255,255,.5);color:#fff" onclick="_mvatManual=false;recalcMileage()">↻ Auto</button></div></div>
     </div>`;
   const actions = canEdit ? `<div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveMileageLine('${line?.id||''}')">Save mileage</button></div>` : `<div class="modal-actions">
-      <button class="btn btn-primary" onclick="closeModal()">Close</button></div>`;
+      <button class="btn btn-primary" onclick="saveMileageLine('${line?.id||''}')">Save mileage</button>
+      ${approveBtn}</div>` : `<div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Close</button>
+      ${approveBtn}</div>`;
   if (editMode){
     const formBlock = canEdit ? formFields : `<fieldset disabled style="border:none;padding:0;margin:0">${formFields}</fieldset>`;
     const readBanner = canEdit ? '' : `<div class="card" style="border-left:5px solid var(--info);padding:10px 14px;margin-bottom:12px"><strong style="color:var(--info)">Read-only review</strong><div class="small">Editing claim lines is reserved for Finance. Use Previous / Next to step through the report.</div></div>`;
@@ -2054,6 +2068,22 @@ async function approveReport(id, stage){
   }
   await idbPut('reports', r); await logAction('report_approved',{report_id:id,stage});
   closeModal(); toast('Approved'); navigate(state.page);
+}
+// Helper used by the "Approve report" button that appears on the last line of Detailed Review.
+// Persists the current line silently (no-op for read-only viewers) and then runs the existing approval flow.
+async function approveFromDetailedReview(reportId, stage){
+  await saveCurrentLineSilent();
+  await approveReport(reportId, stage);
+}
+// Determine whether the current user can approve a given report at its current stage,
+// respecting all the rules (not own report, 1st & 2nd by different people, role/permissions).
+async function approveStageFor(reportId){
+  const r = await idbGet('reports', reportId);
+  if (!r) return null;
+  if (r.user_id === state.user.id) return null;
+  if (r.status === 'awaiting_finance' && isFinance() && r.manager_approved_by !== state.user.id) return 'finance';
+  if (r.status === 'awaiting_manager' && (state.usersById[r.user_id]?.approver1_id === state.user.id || isFinance())) return 'manager';
+  return null;
 }
 // Open the first line of a report in the side-by-side line modal so a reviewer can step through
 // with Prev/Next. For non-finance users, the form fields are locked (read-only review).
