@@ -344,16 +344,11 @@ async function seedDefaults(){
   for (const v of vats) await idbPut('vat_rates', v);
   const vatStd = vats[0].id;
 
-  const cats = mk([['Travel','7400'],['Subsistence','7406'],['Accommodation','7402'],['Fuel','7300'],
-    ['Office Supplies','7500'],['Client Entertaining','8200'],['Mileage','7404'],['Parking & Tolls','7401'],['Sundry','7906']],'categories',['name','nominal_code']);
-  for (const c of cats) await idbPut('categories', c);
-
-  const depts = mk([['Operations','OPS'],['Manufacturing','MFG'],['Sales','SAL'],['Finance','FIN'],
-    ['Installation','INS'],['Design','DSN'],['Management','MGT']],'departments',['name','dept_code']);
-  for (const d of depts) await idbPut('departments', d);
-
-  const locs = mk([['North'],['South'],['Axcess 10']],'locations',['name']);
-  for (const l of locs) await idbPut('locations', l);
+  await seedListsV2();
+  await setSetting('lists_updated_v2','1');
+  const cats  = await idbGetAll('categories');
+  const depts = await idbGetAll('departments');
+  const locs  = await idbGetAll('locations');
 
   // Mileage rate categories + HMRC rates (effective 1 Mar 2026)
   await seedMileageCategoriesAndRates(vatStd);
@@ -369,16 +364,17 @@ async function seedDefaults(){
     roles, department_id:dept, location_id:loc, approver1_id:a1||null, approver2_id:a2||null,
     active:1, must_change_password:false, created_at:nowISO()
   });
-  const finDept = depts.find(d=>d.name==='Finance').id;
-  const opsDept = depts.find(d=>d.name==='Operations').id;
-  const salDept = depts.find(d=>d.name==='Sales').id;
-  const locNorth  = locs.find(l=>l.name==='North').id;
-  const locSouth  = locs.find(l=>l.name==='South').id;
-  const locAx10   = locs.find(l=>l.name==='Axcess 10').id;
-  await u(financeId,'finance','admin123','Helen Foster','h.foster@komfort.com',['employee','manager','finance','credit_card'],finDept,locNorth,null,null);
-  await u(managerId,'manager','manager123','Sarah Mitchell','s.mitchell@komfort.com',['employee','manager','credit_card'],opsDept,locNorth,null,financeId);
-  await u(empId,'employee','employee123','James Okafor','j.okafor@komfort.com',['employee'],opsDept,locAx10,managerId,financeId);
-  await u(ccId,'ccuser','ccuser123','Priya Sharma','p.sharma@komfort.com',['credit_card'],salDept,locSouth,managerId,financeId);
+  const finDept     = depts.find(d=>d.name==='Finance').id;
+  const indirectDept= depts.find(d=>d.name==='Indirect').id;
+  const directDept  = depts.find(d=>d.name==='Direct Labour').id;
+  const salesDept   = depts.find(d=>d.name==='Sales').id;
+  const locLeeds    = locs.find(l=>l.name==='Leeds').id;
+  const locAx10     = locs.find(l=>l.name==='Axcess-10').id;
+  const locCrawley  = locs.find(l=>l.name==='Crawley').id;
+  await u(financeId,'finance','admin123','Helen Foster','h.foster@komfort.com',['employee','manager','finance','credit_card'],finDept,locLeeds,null,null);
+  await u(managerId,'manager','manager123','Sarah Mitchell','s.mitchell@komfort.com',['employee','manager','credit_card'],indirectDept,locLeeds,null,financeId);
+  await u(empId,'employee','employee123','James Okafor','j.okafor@komfort.com',['employee'],directDept,locAx10,managerId,financeId);
+  await u(ccId,'ccuser','ccuser123','Priya Sharma','p.sharma@komfort.com',['credit_card'],salesDept,locCrawley,managerId,financeId);
 
   // Sample report with one expense + one mileage line (unsubmitted, owned by employee)
   const rptId = uuid();
@@ -429,6 +425,60 @@ async function ensureMileageModelV3(){
   await seedMileageCategoriesAndRates();
   await setSetting('mileage_model','v3');
 }
+// Updated reference lists (Komfort actual values) — used by seedDefaults on fresh installs
+// and by migrateListsV2 to update existing browsers exactly once.
+async function seedListsV2(){
+  const cats = [
+    ['Air Travel','8100'],['Building Repairs & Maintenance','8420'],['Car Costs','8300'],
+    ['Consumables','5040'],['Entertaining Clients/Customers','8400'],['Entertaining Employees','8401'],
+    ['IT Hardware','8255'],['IT Software','8255'],['Lodging / Accommodation','8101'],
+    ['Marketing Events','8424'],['Mileage','8301'],['Other Expenses','9999'],
+    ['Parking','8100'],['Postage','8636'],['PPE','8105'],
+    ['Printing and Stationery','8635'],['Subscriptions','8420'],['Subsistence','8101'],
+    ['Telephone','8220'],['Tools','1150'],['Travel','8100']
+  ];
+  for (const [name, code] of cats) await idbPut('categories', { id:uuid(), name, nominal_code:code, active:1 });
+  const depts = [
+    ['Direct Labour','060'],['Estimating','130'],['Finance','140'],['Fitting Labour','080'],
+    ['HR','140'],['Indirect','100'],['Indirect Manufacturing','100'],['IT','140'],
+    ['Marketing','150'],['Projects','100'],['Purchasing','100'],['Sales','130'],
+    ['SOP','130'],['Technical','150'],['Transport','110'],['Warehouse','120']
+  ];
+  for (const [name, code] of depts) await idbPut('departments', { id:uuid(), name, dept_code:code, active:1 });
+  const locs = [
+    ['Axcess-10','500'],['Central','600'],['Crawley','200'],['Leeds','300']
+  ];
+  for (const [name, code] of locs) await idbPut('locations', { id:uuid(), name, location_code:code, active:1 });
+}
+// One-shot: wipe and reseed categories/departments/locations to the Komfort actual values,
+// and remap demo users to sensible new departments + locations. Runs once per browser.
+async function migrateListsV2(){
+  if (await getSetting('lists_updated_v2') === '1') return;
+  for (const c of await idbGetAll('categories'))  await idbDelete('categories', c.id);
+  for (const d of await idbGetAll('departments')) await idbDelete('departments', d.id);
+  for (const l of await idbGetAll('locations'))   await idbDelete('locations', l.id);
+  await seedListsV2();
+  const depts = await idbGetAll('departments');
+  const locs  = await idbGetAll('locations');
+  const dByName = n => depts.find(d=>d.name===n)?.id;
+  const lByName = n => locs.find(l=>l.name===n)?.id;
+  const map = {
+    finance:  { dept:'Finance',       loc:'Leeds' },
+    manager:  { dept:'Indirect',      loc:'Leeds' },
+    employee: { dept:'Direct Labour', loc:'Axcess-10' },
+    ccuser:   { dept:'Sales',         loc:'Crawley' },
+  };
+  for (const u of await idbGetAll('users')){
+    const m = map[u.username];
+    if (m){
+      u.department_id = dByName(m.dept) || u.department_id;
+      u.location_id   = lByName(m.loc)  || u.location_id;
+      await idbPut('users', u);
+    }
+  }
+  await setSetting('lists_updated_v2', '1');
+}
+
 // Ensure the Locations reference list exists, and back-fill the demo users' locations once.
 async function ensureLocations(){
   if ((await idbGetAll('locations')).length === 0){
@@ -2285,7 +2335,7 @@ function exportGlReport(){
 const REF_DEFS = {
   categories: { title:'Categories', singular:'category', fields:[['name','Name','text',true],['nominal_code','Nominal code','text',false]] },
   departments: { title:'Departments', singular:'department', fields:[['name','Name','text',true],['dept_code','Department code','text',false]] },
-  locations: { title:'Locations', singular:'location', fields:[['name','Name','text',true]] },
+  locations: { title:'Locations', singular:'location', fields:[['name','Name','text',true],['location_code','Location code','text',false]] },
   vehicle_types: { title:'Mileage Rate Categories', singular:'mileage rate category', fields:[['name','Category name','text',true]] },
   vat_rates: { title:'VAT Rates', singular:'VAT rate', fields:[['name','Name','text',true],['percent','Percent (%)','number',true]] },
   suppliers: { title:'Suppliers', singular:'supplier', fields:[['name','Name','text',true]] },
@@ -2483,6 +2533,7 @@ function setupReceiptHoverPreview(){
     await seedDefaults();
     await ensureMileageModelV3();
     await ensureLocations();
+    await migrateListsV2();
     await migrateDemoCcuserRoles();
     await backfillReportRefs();
     setupReceiptHoverPreview();
