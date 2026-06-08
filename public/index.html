@@ -120,6 +120,16 @@
     .modal-overlay.active { display: flex; }
     .modal { background: #fff; border-radius: 14px; padding: 24px; max-width: 640px; width: 100%; margin: auto; }
     .modal.wide { max-width: 900px; }
+    .modal.xl { max-width: 1280px; }
+    .review-grid { display:grid; grid-template-columns: 1.1fr 1fr; gap:20px; align-items:start; }
+    @media (max-width: 980px){ .review-grid { grid-template-columns: 1fr; } }
+    .review-receipts { background: var(--bg); border-radius:8px; padding:14px; max-height:75vh; overflow-y:auto; }
+    .review-receipts img { display:block; }
+    .review-form { max-height:75vh; overflow-y:auto; padding:0 4px; }
+    .review-nav { display:flex; align-items:center; justify-content:space-between; background: var(--bg); padding:10px 14px; border-radius:8px; margin-bottom:14px; gap:10px; }
+    .review-nav .pos { color: var(--text-light); font-size:.9rem; font-weight:600; }
+    .review-empty { text-align:center; padding:60px 20px; color: var(--text-light); }
+    .review-empty .ic { font-size:3rem; opacity:.4; display:block; }
     .modal h2 { margin-bottom: 4px; }
     .modal .modal-sub { color: var(--text-light); margin-bottom: 16px; font-size: 0.9rem; }
     .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
@@ -629,8 +639,13 @@ function setTopbar(html){ document.getElementById('topbar-actions').innerHTML = 
 // ═══════════════════════════════════════════════
 function toast(msg, type='success'){ const el=document.createElement('div'); el.className=`toast toast-${type}`; el.textContent=msg; document.getElementById('toast-container').appendChild(el); setTimeout(()=>el.remove(),3800); }
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function openModal(html, wide){ const m=document.getElementById('modal'); m.className='modal'+(wide?' wide':''); m.innerHTML=html; document.getElementById('modal-overlay').classList.add('active'); }
-function closeModal(){ document.getElementById('modal-overlay').classList.remove('active'); _modalStack=[]; }
+function openModal(html, wide){
+  const m=document.getElementById('modal');
+  const sizeClass = wide==='xl' ? ' xl' : (wide ? ' wide' : '');
+  m.className='modal'+sizeClass; m.innerHTML=html;
+  document.getElementById('modal-overlay').classList.add('active');
+}
+function closeModal(){ document.getElementById('modal-overlay').classList.remove('active'); _modalStack=[]; window._lineNav=null; }
 // Modal stack: open a new modal on top of an existing one and pop back when done.
 let _modalStack = [];
 function pushModal(html, wide){
@@ -775,12 +790,122 @@ function addReceipts(e){
   if(!pending) return;
   files.forEach(f=>{
     const reader = new FileReader();
-    reader.onload = () => { _lineReceipts.push({ name:f.name, mime:f.type, data:reader.result }); if(--pending===0) renderReceiptThumbs(); };
+    reader.onload = () => { _lineReceipts.push({ name:f.name, mime:f.type, data:reader.result }); if(--pending===0){ renderReceiptThumbs(); refreshReviewReceiptsPane(); } };
     reader.readAsDataURL(f);
   });
   e.target.value='';
 }
-function removeReceipt(i){ _lineReceipts.splice(i,1); renderReceiptThumbs(); }
+function removeReceipt(i){ _lineReceipts.splice(i,1); renderReceiptThumbs(); refreshReviewReceiptsPane(); }
+
+// Large preview pane used in the edit-line review layout
+async function buildReviewReceiptsPaneInner(receipts){
+  if (!receipts || !receipts.length){
+    return `<div class="review-empty"><span class="ic">📎</span><div>No receipts attached to this line.</div></div>`;
+  }
+  let pdfjs = null;
+  if (receipts.some(r => (r.mime||'').toLowerCase().includes('pdf'))){
+    try { pdfjs = await loadPdfJs(); } catch(e){}
+  }
+  let html = '';
+  for (const r of receipts){
+    const mime = (r.mime||'').toLowerCase();
+    if (mime.startsWith('image/')){
+      html += `<img src="${r.data}" style="width:100%;height:auto;border-radius:6px;margin-bottom:10px;border:1px solid var(--border)">`;
+    } else if (mime.includes('pdf')){
+      if (pdfjs){
+        try {
+          const pdf = await pdfjs.getDocument({ data: dataURLtoUint8Array(r.data) }).promise;
+          const n = Math.min(pdf.numPages, 3);
+          for (let p=1; p<=n; p++){
+            const page = await pdf.getPage(p);
+            const viewport = page.getViewport({ scale: 1.4 });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width; canvas.height = viewport.height;
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+            html += `<img src="${canvas.toDataURL('image/jpeg',0.85)}" style="width:100%;height:auto;border-radius:6px;margin-bottom:6px;border:1px solid var(--border)">`;
+          }
+        } catch(e){
+          html += `<iframe src="${r.data}" style="width:100%;height:520px;border:1px solid var(--border);border-radius:6px;background:#fff;margin-bottom:10px"></iframe>`;
+        }
+      } else {
+        html += `<iframe src="${r.data}" style="width:100%;height:520px;border:1px solid var(--border);border-radius:6px;background:#fff;margin-bottom:10px"></iframe>`;
+      }
+    } else {
+      html += `<div style="padding:14px;background:#fff8e1;border:1px dashed var(--accent);border-radius:6px;margin-bottom:10px">📄 ${esc(r.name||'Receipt')}</div>`;
+    }
+  }
+  return html;
+}
+async function refreshReviewReceiptsPane(){
+  const pane = document.getElementById('review-receipts-content');
+  if (!pane) return;
+  pane.innerHTML = await buildReviewReceiptsPaneInner(_lineReceipts);
+}
+function reviewNavHtml(){
+  const nav = window._lineNav;
+  if (!nav || !nav.ids || nav.ids.length <= 1) return '';
+  return `<div class="review-nav no-print">
+    <button class="btn btn-outline btn-sm" onclick="lineNavGo('prev')" ${nav.idx<=0?'disabled':''}>← Previous</button>
+    <span class="pos">Line ${nav.idx+1} of ${nav.ids.length}</span>
+    <button class="btn btn-outline btn-sm" onclick="lineNavGo('next')" ${nav.idx>=nav.ids.length-1?'disabled':''}>Next →</button>
+  </div>`;
+}
+// Save current edits silently (no toast / no close) and step to the previous/next line
+async function lineNavGo(direction){
+  const nav = window._lineNav;
+  if (!nav || !nav.ids) return;
+  await saveCurrentLineSilent();
+  const newIdx = direction === 'next' ? nav.idx + 1 : nav.idx - 1;
+  if (newIdx < 0 || newIdx >= nav.ids.length) return;
+  nav.idx = newIdx;
+  const nextLine = await idbGet('lines', nav.ids[newIdx]);
+  if (!nextLine) return;
+  if (nextLine.line_type === 'mileage') openMileageLineModal(nextLine);
+  else openExpenseLineModal(nextLine);
+}
+// Persist the current line's form state without closing the modal — used when stepping next/prev
+async function saveCurrentLineSilent(){
+  const nav = window._lineNav; if (!nav) return;
+  const id = nav.ids[nav.idx]; if (!id) return;
+  const line = await idbGet('lines', id); if (!line) return;
+  if (document.getElementById('el-amount')){
+    let supplierId = val('el-supplier');
+    const newSup = val('el-supplier-new');
+    if (newSup){ supplierId = uuid(); await idbPut('suppliers',{ id:supplierId, name:newSup, active:1, created_by:state.user.username, created_at:nowISO() }); }
+    line.line_date    = val('el-date') || line.line_date;
+    line.description  = val('el-desc');
+    line.supplier_id  = supplierId;
+    line.category_id  = val('el-category');
+    line.amount       = round2(numVal('el-amount'));
+    line.vat_rate_id  = val('el-vat-rate');
+    line.vat_amount   = round2(numVal('el-vat'));
+    line.receipts     = _lineReceipts;
+    await idbPut('lines', line);
+  } else if (document.getElementById('ml-dist')){
+    const calc = await recalcMileage();
+    line.line_date     = val('ml-date') || line.line_date;
+    line.description   = val('ml-desc');
+    line.distance_miles= numVal('ml-dist');
+    line.postcode_from = val('ml-from');
+    line.postcode_to   = val('ml-to');
+    line.vehicle_type  = val('ml-cat');
+    line.vehicle_reg   = val('ml-reg');
+    if (calc.rate){
+      line.mileage_rate_id = calc.rate.id;
+      line.rate_up   = Number(calc.rate.rate_pence);
+      line.rate_over = Number(calc.rate.rate_over_pence);
+      line.rate_adv  = Number(calc.rate.afr_pence);
+    }
+    line.amount        = round2(calc.amount);
+    line.vat_amount    = round2(numVal('ml-vat'));
+    line.company_car   = !!document.getElementById('ml-company')?.checked;
+    line.return_journey= !!document.getElementById('ml-return')?.checked;
+    line.miles_under   = calc.under;
+    line.miles_over    = calc.over;
+    line.receipts      = _lineReceipts;
+    await idbPut('lines', line);
+  }
+}
 function viewReceipt(i){
   const r=_lineReceipts[i]; if(!r) return;
   const w=window.open(); if(w){ w.document.write((r.mime||'').startsWith('image/')?`<img src="${r.data}" style="max-width:100%">`:`<iframe src="${r.data}" style="width:100%;height:100vh;border:none"></iframe>`); }
@@ -1024,7 +1149,19 @@ async function submitReport(id){
 // LINE MODALS — Expense
 // ═══════════════════════════════════════════════
 async function addExpenseLine(){ openExpenseLineModal(null); }
-async function editLine(id){ const l=await idbGet('lines',id); l.line_type==='mileage'?openMileageLineModal(l):openExpenseLineModal(l); }
+// When editing a line from the report detail, build a Previous/Next navigation list
+// across all lines on the same report (sorted by date) so reviewers can step through.
+async function editLine(id){
+  const l = await idbGet('lines', id);
+  if (state.currentReportId){
+    const all = (await reportLines(state.currentReportId)).sort((a,b)=>(a.line_date||'').localeCompare(b.line_date||''));
+    const ids = all.map(x=>x.id);
+    const idx = ids.indexOf(id);
+    window._lineNav = ids.length > 1 ? { ids, idx } : null;
+  }
+  if (l.line_type === 'mileage') openMileageLineModal(l);
+  else openExpenseLineModal(l);
+}
 
 async function openExpenseLineModal(line){
   _lineReceipts = line ? [...(line.receipts||[])] : [];
@@ -1032,8 +1169,8 @@ async function openExpenseLineModal(line){
   const catOpts = optionList(cats.map(c=>({value:c.id,label:`${c.name}${c.nominal_code?' ('+c.nominal_code+')':''}`})), line?.category_id, true);
   const supOpts = optionList(sups.map(s=>({value:s.id,label:s.name})), line?.supplier_id, true);
   const vatOpts = optionList(vats.filter(v=>v.active!==0).map(v=>({value:v.id,label:`${v.name}`})), line?.vat_rate_id || vats.find(v=>v.name.includes('Standard'))?.id, false);
-  openModal(`<h2>${line?'Edit':'Add'} expense</h2>
-    <div class="scan-box">📷 <strong>Auto-scan (beta):</strong> attach a receipt photo or PDF below, then click <em>Scan receipt</em> to auto-fill the date, amount &amp; supplier. <span class="muted">Needs an internet connection the first time it runs.</span></div>
+  const editMode = !!line;
+  const formFields = `
     <div class="form-row"><div class="form-group"><label class="req">Date</label><input type="date" id="el-date" value="${line?.line_date||today()}"></div>
       <div class="form-group"><label>Supplier</label><select id="el-supplier">${supOpts}</select>
         <button type="button" class="btn btn-sm btn-outline" style="margin-top:6px" onclick="toggleNewSupplier()">+ New supplier</button>
@@ -1047,16 +1184,37 @@ async function openExpenseLineModal(line){
         <div style="display:flex;gap:6px"><input type="number" step="0.01" id="el-vat" value="${line?.vat_amount??''}" oninput="_vatManual=true" style="flex:1">
         <button type="button" class="btn btn-sm btn-outline" title="Recalculate from rate" onclick="_vatManual=false;recalcExpenseVat()">↻ Auto</button></div>
         <div class="small muted">Auto-calculated, but you can type any VAT amount — it won't be overwritten.</div></div>
-      <div class="form-group"><label>Description</label><input id="el-desc" value="${esc(line?.description||'')}"></div></div>
-    ${receiptsInputHtml()}
-    <div class="modal-actions">
+      <div class="form-group"><label>Description</label><input id="el-desc" value="${esc(line?.description||'')}"></div></div>`;
+  const actions = `<div class="modal-actions">
       <button class="btn btn-outline" onclick="runReceiptScan()">⮌ Scan receipt</button>
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveExpenseLine('${line?.id||''}')">Save expense</button>
-    </div>`, true);
+    </div>`;
+  if (editMode){
+    openModal(`<h2>Edit expense</h2>
+      ${reviewNavHtml()}
+      <div class="review-grid">
+        <div class="review-receipts">
+          <h3 style="margin:0 0 10px;font-size:.95rem;color:var(--text-light);text-transform:uppercase;letter-spacing:.5px">Receipts</h3>
+          <div id="review-receipts-content"><div class="muted small">Loading receipts…</div></div>
+          ${receiptsInputHtml()}
+        </div>
+        <div class="review-form">
+          ${formFields}
+          ${actions}
+        </div>
+      </div>`, 'xl');
+  } else {
+    openModal(`<h2>Add expense</h2>
+      <div class="scan-box">📷 <strong>Auto-scan (beta):</strong> attach a receipt photo or PDF below, then click <em>Scan receipt</em> to auto-fill the date, amount &amp; supplier. <span class="muted">Needs an internet connection the first time it runs.</span></div>
+      ${formFields}
+      ${receiptsInputHtml()}
+      ${actions}`, true);
+  }
   renderReceiptThumbs();
   _vatManual = false;
-  if(!line) recalcExpenseVat();
+  if (!line) recalcExpenseVat();
+  if (editMode) refreshReviewReceiptsPane();
 }
 function toggleNewSupplier(){ const i=document.getElementById('el-supplier-new'); i.classList.toggle('hidden'); if(!i.classList.contains('hidden')){ document.getElementById('el-supplier').value=''; i.focus(); } }
 async function recalcExpenseVat(){
@@ -1106,8 +1264,9 @@ async function openMileageLineModal(line){
   const rpt = await idbGet('reports', state.currentReportId); _mlOwnerId = rpt?.user_id || state.user.id;
   const cats = await ref('vehicle_types');
   const catOpts = optionList(cats.map(v=>({value:v.name,label:v.name})), line?.vehicle_type, true);
-  const companyChecked = line ? !!line.company_car : true;   // default ticked for new claims
-  openModal(`<h2>${line?'Edit':'Add'} mileage</h2>
+  const companyChecked = line ? !!line.company_car : true;
+  const editMode = !!line;
+  const formFields = `
     <div class="form-row"><div class="form-group"><label class="req">Date</label><input type="date" id="ml-date" value="${line?.line_date||today()}" onchange="recalcMileage()"></div>
       <div class="form-group"><label class="req">Vehicle reg</label><input id="ml-reg" value="${esc(line?.vehicle_reg||'')}" placeholder="e.g. YK19 ABC"></div></div>
     <div class="form-row-3">
@@ -1133,13 +1292,33 @@ async function openMileageLineModal(line){
       <div class="t"><label class="small" style="color:rgba(255,255,255,.7);display:block;margin-bottom:2px">VAT (£) — editable</label>
         <div style="display:flex;gap:6px"><input type="number" step="0.01" id="ml-vat" value="${line?.vat_amount??''}" oninput="_mvatManual=true" style="width:120px">
         <button type="button" class="btn btn-sm btn-outline" style="border-color:rgba(255,255,255,.5);color:#fff" onclick="_mvatManual=false;recalcMileage()">↻ Auto</button></div></div>
-    </div>
-    ${receiptsInputHtml()}
-    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveMileageLine('${line?.id||''}')">Save mileage</button></div>`, true);
+    </div>`;
+  const actions = `<div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveMileageLine('${line?.id||''}')">Save mileage</button></div>`;
+  if (editMode){
+    openModal(`<h2>Edit mileage</h2>
+      ${reviewNavHtml()}
+      <div class="review-grid">
+        <div class="review-receipts">
+          <h3 style="margin:0 0 10px;font-size:.95rem;color:var(--text-light);text-transform:uppercase;letter-spacing:.5px">Receipts</h3>
+          <div id="review-receipts-content"><div class="muted small">Loading receipts…</div></div>
+          ${receiptsInputHtml()}
+        </div>
+        <div class="review-form">
+          ${formFields}
+          ${actions}
+        </div>
+      </div>`, 'xl');
+  } else {
+    openModal(`<h2>Add mileage</h2>
+      ${formFields}
+      ${receiptsInputHtml()}
+      ${actions}`, true);
+  }
   renderReceiptThumbs();
   _mvatManual = false;
   recalcMileage();
+  if (editMode) refreshReviewReceiptsPane();
 }
 let _mlCalc = null;   // last computed { amount, vat, rate, under, over }
 async function recalcMileage(){
