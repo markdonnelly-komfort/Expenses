@@ -1240,6 +1240,7 @@ async function openExpenseLineModal(line){
   const onLastLine = editMode && nav && nav.idx === nav.ids.length - 1;
   const approveStageHere = onLastLine && state.currentReportId ? await approveStageFor(state.currentReportId) : null;
   const approveBtn = approveStageHere ? `<button class="btn btn-success" onclick="approveFromDetailedReview('${state.currentReportId}','${approveStageHere}')">✓ Approve report</button>` : '';
+  const rejectBtn  = approveStageHere ? `<button class="btn btn-danger" onclick="rejectFromDetailedReview('${state.currentReportId}')">↺ Return to employee</button>` : '';
   const formFields = `
     <div class="form-row"><div class="form-group"><label class="req">Date</label><input type="date" id="el-date" value="${line?.line_date||today()}"></div>
       <div class="form-group"><label>Supplier</label><select id="el-supplier">${supOpts}</select>
@@ -1259,10 +1260,10 @@ async function openExpenseLineModal(line){
       <button class="btn btn-outline" onclick="runReceiptScan()">⮌ Scan receipt</button>
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveExpenseLine('${line?.id||''}')">Save expense</button>
-      ${approveBtn}
+      ${rejectBtn}${approveBtn}
     </div>` : `<div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal()">Close</button>
-      ${approveBtn}
+      ${rejectBtn}${approveBtn}
     </div>`;
   if (editMode){
     const formBlock = canEdit ? formFields : `<fieldset disabled style="border:none;padding:0;margin:0">${formFields}</fieldset>`;
@@ -1348,6 +1349,7 @@ async function openMileageLineModal(line){
   const onLastLine = editMode && nav && nav.idx === nav.ids.length - 1;
   const approveStageHere = onLastLine && state.currentReportId ? await approveStageFor(state.currentReportId) : null;
   const approveBtn = approveStageHere ? `<button class="btn btn-success" onclick="approveFromDetailedReview('${state.currentReportId}','${approveStageHere}')">✓ Approve report</button>` : '';
+  const rejectBtn  = approveStageHere ? `<button class="btn btn-danger" onclick="rejectFromDetailedReview('${state.currentReportId}')">↺ Return to employee</button>` : '';
   const formFields = `
     <div class="form-row"><div class="form-group"><label class="req">Date</label><input type="date" id="ml-date" value="${line?.line_date||today()}" onchange="recalcMileage()"></div>
       <div class="form-group"><label class="req">Vehicle reg</label><input id="ml-reg" value="${esc(line?.vehicle_reg||'')}" placeholder="e.g. YK19 ABC"></div></div>
@@ -1377,9 +1379,9 @@ async function openMileageLineModal(line){
     </div>`;
   const actions = canEdit ? `<div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveMileageLine('${line?.id||''}')">Save mileage</button>
-      ${approveBtn}</div>` : `<div class="modal-actions">
+      ${rejectBtn}${approveBtn}</div>` : `<div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal()">Close</button>
-      ${approveBtn}</div>`;
+      ${rejectBtn}${approveBtn}</div>`;
   if (editMode){
     const formBlock = canEdit ? formFields : `<fieldset disabled style="border:none;padding:0;margin:0">${formFields}</fieldset>`;
     const readBanner = canEdit ? '' : `<div class="card" style="border-left:5px solid var(--info);padding:10px 14px;margin-bottom:12px"><strong style="color:var(--info)">Read-only review</strong><div class="small">Editing claim lines is reserved for Finance. Use Previous / Next to step through the report.</div></div>`;
@@ -2074,6 +2076,18 @@ async function approveReport(id, stage){
 async function approveFromDetailedReview(reportId, stage){
   await saveCurrentLineSilent();
   await approveReport(reportId, stage);
+}
+// "Return to employee" from Detailed Review — prompts for the required note, then rejects.
+async function rejectFromDetailedReview(reportId){
+  const note = prompt('Note to the employee (required) — explain what needs to change:');
+  if (!note || !note.trim()){ toast('A note is required to return a claim','error'); return; }
+  await saveCurrentLineSilent();
+  const r = await idbGet('reports', reportId);
+  if (!r) return;
+  r.status='rejected'; r.rejected_by=state.user.id; r.rejected_at=nowISO(); r.rejection_note=note.trim();
+  await idbPut('reports', r);
+  await logAction('report_rejected', { report_id: reportId });
+  closeModal(); toast('Returned to employee'); navigate(state.page);
 }
 // Determine whether the current user can approve a given report at its current stage,
 // respecting all the rules (not own report, 1st & 2nd by different people, role/permissions).
