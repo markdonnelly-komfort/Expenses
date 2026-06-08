@@ -545,7 +545,8 @@ function navItems(){
     items.push({ id:'mileage-all', label:'Mileage Tracker', ic:'⛽', onclick:"window._mtUser='ALL';navigate('mileage-all')" });
     items.push({ id:'analytics', label:'Reports', ic:'▣' });
     items.push({ id:'gl-report', label:'GL Report', ic:'⊞' });
-    items.push({ id:'adm-users', label:'Users', ic:'⚷', sec:'Administration' });
+    items.push({ id:'adm-settings', label:'Company Details', ic:'⚙', sec:'Administration' });
+    items.push({ id:'adm-users', label:'Users', ic:'⚷' });
     items.push({ id:'adm-categories', label:'Categories', ic:'▤' });
     items.push({ id:'adm-departments', label:'Departments', ic:'▥' });
     items.push({ id:'adm-locations', label:'Locations', ic:'⌂' });
@@ -581,7 +582,7 @@ async function computeBadges(){
 const PAGE_TITLES = {
   dashboard:'Dashboard', 'my-expenses':'My Expense Reports', 'my-cc':'Company Credit Card', 'my-mileage':'My Mileage', 'mileage-all':'Mileage Tracker — All Employees', approvals:'Approvals',
   'finance-approvals':'Finance Approvals', 'all-claims':'All Claims', 'payment-runs':'Payment Runs', analytics:'Reports', 'gl-report':'GL Report',
-  'adm-users':'Users', 'adm-categories':'Categories', 'adm-departments':'Departments', 'adm-locations':'Locations', 'adm-vehicles':'Mileage Rate Categories',
+  'adm-settings':'Company Details', 'adm-users':'Users', 'adm-categories':'Categories', 'adm-departments':'Departments', 'adm-locations':'Locations', 'adm-vehicles':'Mileage Rate Categories',
   'adm-mileage':'Mileage Rates', 'adm-vat':'VAT Rates', 'adm-suppliers':'Suppliers'
 };
 async function navigate(page){
@@ -607,6 +608,7 @@ async function navigate(page){
       case 'analytics': await renderAnalytics(c); break;
       case 'gl-report': await renderGlReport(c); break;
       case 'adm-users': await renderUsers(c); break;
+      case 'adm-settings': await renderCompanySettings(c); break;
       case 'adm-categories': await renderRef(c,'categories'); break;
       case 'adm-departments': await renderRef(c,'departments'); break;
       case 'adm-locations': await renderRef(c,'locations'); break;
@@ -853,7 +855,8 @@ async function renderReportList(c, type){
       ${rows.map(r=>`<tr class="clickable" onclick="openReport('${r.id}')">
         <td><strong>${esc(r.title)}</strong><div class="small muted">${r.reference?esc(r.reference)+' · ':''}Created ${fmtDate(r.created_at)}</div></td>
         <td>${r._t.count}</td><td class="num">${fmtMoney(r._t.net)}</td><td class="num">${fmtMoney(r._t.vat)}</td>
-        <td class="num"><strong>${fmtMoney(r._t.gross)}</strong></td><td>${statusBadge(r.status)}</td><td>›</td></tr>`).join('')
+        <td class="num"><strong>${fmtMoney(r._t.gross)}</strong></td><td>${statusBadge(r.status)}</td>
+        <td><button class="btn btn-sm btn-outline" title="Print / Save as PDF" onclick="event.stopPropagation();printableReport('${r.id}')">🖨</button></td></tr>`).join('')
       || `<tr><td colspan="7" class="muted" style="padding:30px;text-align:center">No reports in this category. ${active==='unsubmitted'?'Click <strong>+ New Report</strong> to start.':''}</td></tr>`}
     </tbody></table></div></div>`;
 }
@@ -952,7 +955,8 @@ async function openReport(id){
       ${editable ? `<button class="btn btn-outline" onclick="renameReport('${r.id}')">Rename</button>
       <button class="btn btn-danger" onclick="deleteReport('${r.id}')">Delete report</button>`:''}
       ${approveStage ? `<button class="btn btn-success" onclick="approveReport('${r.id}','${approveStage}')">Approve</button>`:''}
-      <button class="btn btn-info" style="margin-left:auto" onclick="exportReport('${r.id}')">Export to Excel</button>
+      <button class="btn btn-outline" style="margin-left:auto" onclick="printableReport('${r.id}')">🖨 Print / PDF</button>
+      <button class="btn btn-info" onclick="exportReport('${r.id}')">Export to Excel</button>
     </div></div>`);
 }
 function c_html(html){ document.getElementById('content').innerHTML = html; }
@@ -1436,6 +1440,178 @@ async function exportReport(id){
   downloadExcel(`${fname}.xls`, 'Report', headers, rows, (r.reference?r.reference+' — ':'') + r.title + ' — ' + userName(r.user_id));
 }
 
+// Komfort-branded printable report — opens in a new tab; the user prints to PDF via Ctrl/Cmd+P.
+// Embedded receipts: images are placed as <img>; PDF receipts are rendered to images via pdf.js
+// (lazy-loaded, same library that powers auto-scan), or shown as a placeholder if pdf.js is offline.
+async function printableReport(reportId){
+  const r = await idbGet('reports', reportId);
+  if (!r){ toast('Report not found','error'); return; }
+  const lines = (await reportLines(reportId)).sort((a,b)=>(a.line_date||'').localeCompare(b.line_date||''));
+  const sups = await refAll('suppliers'); const cats = await refAll('categories');
+  const depts = await refAll('departments'); const locs = await refAll('locations');
+  const owner = state.usersById[r.user_id];
+  const dept = depts.find(d=>d.id===owner?.department_id);
+  const loc  = locs.find(l=>l.id===owner?.location_id);
+  const t = lineTotals(lines);
+
+  const companyName = await getSetting('company_name', COMPANY);
+  const companyAddress = await getSetting('company_address', '');
+
+  // Inline the logo SVG so the print window doesn't need a network fetch from inside about:blank
+  let logoSvg = '';
+  try { logoSvg = await (await fetch('/logo.svg')).text(); } catch(e){}
+
+  toast('Preparing printable report…','info');
+  let pdfjs = null;
+  try { pdfjs = await loadPdfJs(); } catch(e){}   // falls through gracefully if offline
+
+  // Render every receipt for every line; convert PDF receipts to images (up to 5 pages each)
+  const receiptSections = [];
+  for (const l of lines){
+    if (!l.receipts || l.receipts.length === 0) continue;
+    const label = l.line_type==='mileage'
+      ? `${fmtDate(l.line_date)} · ${l.postcode_from} → ${l.postcode_to}`
+      : `${fmtDate(l.line_date)} · ${nameById(sups, l.supplier_id)} · ${fmtMoney(l.amount)}`;
+    const images = [];
+    for (const rc of l.receipts){
+      const mime = (rc.mime||'').toLowerCase();
+      if (mime.startsWith('image/')){
+        images.push(rc.data);
+      } else if (mime.includes('pdf') && pdfjs){
+        try {
+          const pdf = await pdfjs.getDocument({ data: dataURLtoUint8Array(rc.data) }).promise;
+          const n = Math.min(pdf.numPages, 5);
+          for (let p=1; p<=n; p++){
+            const page = await pdf.getPage(p);
+            const viewport = page.getViewport({ scale: 1.5 });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width; canvas.height = viewport.height;
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+            images.push(canvas.toDataURL('image/jpeg', 0.85));
+          }
+        } catch(e){ images.push({ placeholder: 'PDF receipt could not be rendered: '+(rc.name||'receipt.pdf') }); }
+      } else {
+        images.push({ placeholder: 'Receipt file: '+(rc.name||'receipt') });
+      }
+    }
+    receiptSections.push({ label, images });
+  }
+
+  const lineRows = lines.map(l=>{
+    const isMile = l.line_type==='mileage';
+    const supplier = isMile ? '—' : nameById(sups, l.supplier_id);
+    const details = isMile
+      ? `Mileage · ${esc(l.postcode_from||'')} → ${esc(l.postcode_to||'')}${l.return_journey?' (return)':''} · ${l.distance_miles||0}mi${l.company_car?' · Company car':''}${l.description?'<br><span class="muted">'+esc(l.description)+'</span>':''}`
+      : `${esc(nameById(cats, l.category_id)||'')}${l.description?'<br><span class="muted">'+esc(l.description)+'</span>':''}`;
+    const gross = Number(l.amount)||0;
+    const vat = Number(l.vat_amount)||0;
+    const net = gross - vat;
+    return `<tr>
+      <td>${fmtDate(l.line_date)}</td>
+      <td>${details}</td>
+      <td>${esc(supplier)}</td>
+      <td class="num">£${net.toFixed(2)}</td>
+      <td class="num">£${vat.toFixed(2)}</td>
+      <td class="num"><strong>£${gross.toFixed(2)}</strong></td>
+    </tr>`;
+  }).join('');
+
+  const w = window.open('', '_blank');
+  if (!w){ toast('Pop-up blocked — please allow pop-ups for this site','error'); return; }
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${esc(r.reference||'')} ${esc(r.title)}</title>
+<style>
+  body { font:11pt Helvetica,Arial,sans-serif; color:#404042; max-width:210mm; margin:10mm auto; padding:0 6mm; }
+  .muted { color:#757677; font-size:9pt }
+  @media print { @page { size:A4; margin:14mm; } body { max-width:none; margin:0; padding:0 } .no-print { display:none } .receipts h3 { page-break-before:always } .receipt-block { page-break-inside:avoid } }
+  .actions { text-align:right; margin-bottom:12px }
+  .actions button { padding:9px 18px; border-radius:6px; border:none; background:#404042; color:#FDC82F; font-weight:600; cursor:pointer; font-size:10pt; margin-left:8px }
+  .actions button.secondary { background:#fff; color:#404042; border:1px solid #565a5c }
+  .header { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:4px solid #FDC82F; padding-bottom:12px; margin-bottom:14px; gap:20px }
+  .logo svg { height:60px; width:auto }
+  .addr { text-align:right; font-size:9pt; line-height:1.5; color:#565a5c; white-space:pre-line }
+  .addr strong { color:#404042; font-size:10pt; display:block; margin-bottom:2px }
+  h1 { font-size:18pt; color:#404042; margin:6px 0 2px }
+  .ref { font-size:12pt; color:#565a5c; font-weight:600; letter-spacing:0.5px; margin-bottom:8px }
+  .ref .badge { background:#FDC82F; color:#404042; padding:2px 10px; border-radius:10px; font-size:10pt; margin-right:8px }
+  .meta { display:grid; grid-template-columns:1fr 1fr; gap:6px 28px; font-size:10pt; margin:10px 0 14px; padding:12px 16px; background:#f4f6f7; border-radius:6px; border-left:4px solid #FDC82F }
+  .meta .row { display:flex; gap:10px }
+  .meta dt { color:#757677; font-weight:600; min-width:140px; margin:0 }
+  .meta dd { margin:0; color:#404042 }
+  .total-banner { background:#404042; color:#fff; padding:14px 18px; border-radius:6px; display:flex; justify-content:space-between; align-items:center; margin-bottom:14px }
+  .total-banner .label { color:rgba(255,255,255,.7); font-size:9pt; text-transform:uppercase; letter-spacing:1.2px; margin-bottom:2px }
+  .total-banner .amount { font-size:20pt; font-weight:bold; color:#FDC82F }
+  h3.section { font-size:11pt; color:#565a5c; margin:14px 0 6px; text-transform:uppercase; letter-spacing:1px; border-bottom:2px solid #FDC82F; padding-bottom:4px }
+  table { width:100%; border-collapse:collapse }
+  th,td { padding:7px 10px; border-bottom:1px solid #dfe2e4; font-size:10pt; text-align:left; vertical-align:top }
+  th { background:#f4f6f7; color:#404042; font-weight:700; border-bottom:2px solid #565a5c }
+  td.num,th.num { text-align:right; white-space:nowrap }
+  tr.totals td { font-weight:bold; border-top:2px solid #404042; border-bottom:none; background:#fafbfc; padding-top:10px; font-size:11pt }
+  .receipts h3 { color:#404042; border-bottom:2px solid #FDC82F; padding-bottom:6px; margin-top:24px; font-size:13pt }
+  .receipt-block { margin:14px 0 24px }
+  .receipt-block h4 { font-size:10pt; margin:0 0 6px; color:#565a5c; font-weight:600 }
+  .receipt-block img { max-width:100%; max-height:225mm; display:block; margin-bottom:8px; border:1px solid #dfe2e4 }
+  .placeholder { padding:10px 14px; background:#fff8e1; border:1px dashed #FDC82F; color:#565a5c; font-size:9.5pt; border-radius:4px }
+  .footer { margin-top:30px; padding-top:10px; border-top:1px solid #dfe2e4; font-size:8pt; color:#757677; text-align:center }
+</style></head>
+<body>
+  <div class="actions no-print">
+    <button onclick="window.print()">🖨 Print / Save as PDF</button>
+    <button class="secondary" onclick="window.close()">Close</button>
+  </div>
+
+  <div class="header">
+    <div class="logo">${logoSvg}</div>
+    <div class="addr"><strong>${esc(companyName)}</strong>${esc(companyAddress)}</div>
+  </div>
+
+  <h1>${esc(r.title)}</h1>
+  <div class="ref"><span class="badge">${esc(r.reference||'—')}</span>${r.type==='creditcard'?'Credit Card Report':'Expense Report'}</div>
+
+  <div class="meta">
+    <div class="row"><dt>Submitted by</dt><dd>${esc(userName(r.user_id))}</dd></div>
+    <div class="row"><dt>Department</dt><dd>${esc(dept?.name||'—')}${dept?.dept_code?' ('+esc(dept.dept_code)+')':''}</dd></div>
+    <div class="row"><dt>Location</dt><dd>${esc(loc?.name||'—')}</dd></div>
+    <div class="row"><dt>Submitted on</dt><dd>${r.submitted_at?fmtDate(r.submitted_at):'—'}</dd></div>
+    <div class="row"><dt>Manager approved</dt><dd>${r.manager_approved_at?esc(userName(r.manager_approved_by))+' on '+fmtDate(r.manager_approved_at):'—'}</dd></div>
+    <div class="row"><dt>Finance approved</dt><dd>${r.finance_approved_at?esc(userName(r.finance_approved_by))+' on '+fmtDate(r.finance_approved_at):'—'}</dd></div>
+    ${r.type==='creditcard'
+      ? `<div class="row"><dt>Status</dt><dd>${esc(STATUS_META[r.status]?.label||r.status)}</dd></div>`
+      : `<div class="row"><dt>Reimbursed on</dt><dd>${r.reimbursed_at?fmtDate(r.reimbursed_at):'—'}</dd></div>`}
+    <div class="row"><dt>Lines</dt><dd>${t.count}</dd></div>
+  </div>
+
+  <div class="total-banner">
+    <div><div class="label">Total ${r.type==='creditcard'?'on credit card':'to reimburse'}</div></div>
+    <div class="amount">£${t.gross.toFixed(2)}</div>
+  </div>
+
+  <h3 class="section">Expense Summary</h3>
+  <table>
+    <thead><tr><th>Date</th><th>Details</th><th>Supplier</th><th class="num">Net</th><th class="num">VAT</th><th class="num">Total</th></tr></thead>
+    <tbody>
+      ${lineRows || '<tr><td colspan="6" style="text-align:center;color:#757677;padding:20px">No lines on this report.</td></tr>'}
+      <tr class="totals"><td colspan="3">Totals</td><td class="num">£${t.net.toFixed(2)}</td><td class="num">£${t.vat.toFixed(2)}</td><td class="num">£${t.gross.toFixed(2)}</td></tr>
+    </tbody>
+  </table>
+
+  ${receiptSections.length ? `
+    <div class="receipts">
+      <h3>Receipts</h3>
+      ${receiptSections.map(s=>`
+        <div class="receipt-block">
+          <h4>${esc(s.label)}</h4>
+          ${s.images.map(img => typeof img === 'string'
+            ? `<img src="${img}">`
+            : `<div class="placeholder">${esc(img.placeholder)}</div>`).join('')}
+        </div>`).join('')}
+    </div>` : '<p class="muted" style="margin-top:16px">No receipts attached to this report.</p>'}
+
+  <div class="footer">${esc(companyName)} · Generated ${new Date().toLocaleString('en-GB')} · ${esc(r.reference||r.title)}</div>
+</body></html>`;
+  w.document.write(html);
+  w.document.close();
+}
+
 // ═══════════════════════════════════════════════
 // MILEAGE TRACKER (per employee, per tax year)
 // ═══════════════════════════════════════════════
@@ -1543,7 +1719,8 @@ async function renderApprovals(c){
         ${queue.map(r=>`<tr><td class="clickable" onclick="openApproval('${r.id}','manager')"><strong>${esc(r.title)}</strong>${r.reference?`<div class="small muted">${esc(r.reference)}</div>`:''}</td>
           <td>${esc(userName(r.user_id))}</td><td>${r.type==='creditcard'?'Credit card':'Expense'}</td><td>${fmtDate(r.submitted_at)}</td>
           <td class="num">${fmtMoney(r._t.gross)}</td>
-          <td><button class="btn btn-sm btn-success" onclick="openApproval('${r.id}','manager')">Review</button></td></tr>`).join('')
+          <td><button class="btn btn-sm btn-success" onclick="openApproval('${r.id}','manager')">Review</button>
+          <button class="btn btn-sm btn-outline" title="Print / Save as PDF" onclick="printableReport('${r.id}')">🖨</button></td></tr>`).join('')
         || '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Nothing awaiting your approval.</td></tr>'}
       </tbody></table></div></div>
     ${decided.length?`<div class="card"><h3>Previously approved by you</h3><div class="table-wrap"><table><tbody>
@@ -1560,7 +1737,8 @@ async function renderFinanceApprovals(c){
         <td>${esc(userName(r.user_id))}</td><td>${r.type==='creditcard'?'Credit card':'Expense'}</td>
         <td>${r.manager_approved_at?userName(r.manager_approved_by):'<span class="muted">direct</span>'}</td>
         <td class="num">${fmtMoney(r._t.gross)}</td>
-        <td><button class="btn btn-sm btn-success" onclick="openApproval('${r.id}','finance')">Review</button></td></tr>`).join('')
+        <td><button class="btn btn-sm btn-success" onclick="openApproval('${r.id}','finance')">Review</button>
+        <button class="btn btn-sm btn-outline" title="Print / Save as PDF" onclick="printableReport('${r.id}')">🖨</button></td></tr>`).join('')
       || '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Nothing awaiting finance approval.</td></tr>'}
     </tbody></table></div></div>`;
 }
@@ -1998,6 +2176,25 @@ async function saveMileageRate(id){
   Object.assign(rec,{ vehicle_type:cat, rate_pence:up, rate_over_pence:over, afr_pence:adv, vat_rate_id:val('mr-vat'), effective_from:val('mr-eff') });
   delete rec.name;
   await idbPut('mileage_rates', rec); closeModal(); navigate('adm-mileage');
+}
+
+// ── Company details (finance admin) — used as the header on every printable report ──
+async function renderCompanySettings(c){
+  const name = await getSetting('company_name', COMPANY);
+  const address = await getSetting('company_address', '');
+  c.innerHTML = `<div class="card" style="max-width:640px">
+    <p class="small muted" style="margin-bottom:12px">These details appear in the header of every printable expense report.</p>
+    <div class="form-group"><label>Company name</label><input id="cs-name" value="${esc(name)}"></div>
+    <div class="form-group"><label>Company address</label>
+      <textarea id="cs-address" rows="6" placeholder="e.g.&#10;Park Spring Mills, Aberford Road&#10;Garforth, Leeds, LS25 1NB&#10;United Kingdom">${esc(address)}</textarea>
+      <div class="small muted">Free text — line breaks are preserved when the report is printed.</div></div>
+    <div style="text-align:right"><button class="btn btn-primary" onclick="saveCompanySettings()">Save</button></div>
+  </div>`;
+}
+async function saveCompanySettings(){
+  await setSetting('company_name', val('cs-name') || COMPANY);
+  await setSetting('company_address', document.getElementById('cs-address').value || '');
+  toast('Company details saved');
 }
 
 // ── Users (finance admin) ──
