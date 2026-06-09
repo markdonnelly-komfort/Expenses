@@ -596,6 +596,9 @@ function navItems(){
   if (isFinance()) items.push({ id:'dashboard', label:'Dashboard', ic:'▦' });
   if (isEmployee()) items.push({ id:'my-expenses', label:'My Expenses', ic:'£', sec:'Mine' });
   if (isCC()) items.push({ id:'my-cc', label:'Credit Card', ic:'▭', sec: isEmployee() ? undefined : 'Mine' });
+  // Non-finance credit-card users see a personal "My CC Spend" report (scoped to their own spend);
+  // finance users already see the full Credit Card Report under Finance below.
+  if (isCC() && !isFinance()) items.push({ id:'cc-report', label:'My CC Spend', ic:'▭' });
   if (isEmployee()) items.push({ id:'my-mileage', label:'My Mileage', ic:'⛽', onclick:"window._mtUser=undefined;navigate('my-mileage')" });
   if (isManager() || isFinance()) items.push({ id:'approvals', label:'Approvals', ic:'✔', badge:'mgr', sec:'Approve' });
   if (isFinance()){
@@ -2466,7 +2469,10 @@ async function renderCcReport(c){
   const monthStart = td.slice(0,7) + '-01';
   const from = window._ccFrom || monthStart;
   const to   = window._ccTo   || td;
-  const empFilter = window._ccEmp || '';
+  // Non-finance credit-card users are always scoped to their own spend
+  const fin = isFinance();
+  const empFilter = fin ? (window._ccEmp || '') : state.user.id;
+  if (!fin) document.getElementById('page-title').textContent = 'My Credit Card Spend';
 
   const reports = await idbGetAll('reports');
   const allLines = await idbGetAll('lines');
@@ -2501,14 +2507,14 @@ async function renderCcReport(c){
 
   setTopbar(`<button class="btn btn-accent" onclick="exportCcReport()">Export to Excel</button>`);
   c.innerHTML = `
-    <div class="card"><p class="small muted" style="margin-bottom:8px">All <strong>credit card</strong> lines in the chosen date range, showing the <em>purchase for department</em> per line.</p>
+    <div class="card"><p class="small muted" style="margin-bottom:8px">${fin?'All <strong>credit card</strong> lines in the chosen date range, showing the <em>purchase for department</em> per line.':'Your credit card spend in the chosen date range, with the <em>purchase for department</em> for each line.'}</p>
       <div class="toolbar">
         <label class="small muted">From</label><input type="date" id="cc-from" value="${from}" onchange="window._ccFrom=this.value;navigate('cc-report')">
         <label class="small muted">To</label><input type="date" id="cc-to" value="${to}" onchange="window._ccTo=this.value;navigate('cc-report')">
-        <label class="small muted">Employee</label><select onchange="window._ccEmp=this.value;navigate('cc-report')">
+        ${fin ? `<label class="small muted">Employee</label><select onchange="window._ccEmp=this.value;navigate('cc-report')">
           <option value="">All employees</option>
           ${ccUsers.map(u=>`<option value="${u.id}" ${empFilter===u.id?'selected':''}>${esc(u.full_name)}</option>`).join('')}
-        </select>
+        </select>` : ''}
         <span class="grow small muted">${rows.length} line(s)</span>
       </div>
     </div>
