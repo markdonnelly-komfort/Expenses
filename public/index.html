@@ -1108,7 +1108,7 @@ async function openReport(id){
   const vatName = id2 => vats.find(v=>v.id===id2)?.name || '—';
 
   document.getElementById('page-title').textContent = `${r.reference?r.reference+' · ':''}${r.title}`;
-  setTopbar(`<button class="btn btn-outline btn-sm" onclick="navigate('${returnTo}')">‹ Back to ${esc(returnLabel)}</button>`);
+  setTopbar(`<button class="btn btn-accent btn-sm" onclick="navigate('${returnTo}')">‹ Back to ${esc(returnLabel)}</button>`);
 
   const dups = await findDuplicatesFor(lines, r.user_id);
   const lineRows = lines.map(l=>{
@@ -1131,7 +1131,7 @@ async function openReport(id){
   const dupBanner = dups.size ? `<div class="card" style="border-left:5px solid var(--warning)"><strong style="color:var(--warning)">⚠ ${dups.size} possible duplicate${dups.size>1?'s':''}</strong><div class="small">One or more lines below look like they may already exist in another claim. This is only a warning — you can still submit and approve.</div></div>` : '';
 
   c_html(`
-    <div style="margin-bottom:12px"><button class="btn btn-outline btn-sm" onclick="navigate('${returnTo}')">‹ Back to ${esc(returnLabel)}</button></div>
+    <div style="margin-bottom:12px"><button class="btn btn-primary" onclick="navigate('${returnTo}')" style="padding:10px 18px">‹ Back to ${esc(returnLabel)}</button></div>
     ${r.status==='rejected' ? `<div class="card" style="border-left:5px solid var(--danger)"><strong style="color:var(--danger)">Returned for changes</strong><div class="small">${esc(r.rejection_note)||'No note provided.'} — please amend and resubmit.</div></div>`:''}
     ${isLocked ? `<div class="card" style="border-left:5px solid var(--success)"><strong style="color:var(--success)">🔒 Locked</strong><div class="small">This ${isCCt?'credit-card':'expense'} report has been ${isCCt?'fully approved':'reimbursed'} and is now locked from further amendment.</div></div>` : ''}
     ${financeEditing ? `<div class="card" style="border-left:5px solid var(--info)"><strong style="color:var(--info)">Finance edit mode</strong><div class="small">You are editing ${esc(owner?.full_name||'this employee')}'s claim (status: ${STATUS_META[r.status]?.label||r.status}). Changes are saved immediately and do not change the approval status.</div></div>`:''}
