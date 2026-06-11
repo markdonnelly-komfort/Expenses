@@ -2558,6 +2558,21 @@ async function parseCcStatementPdf(dataUrl){
   }
   return txs;
 }
+// Supplier-name similarity for statement-description vs report-line supplier.
+// Returns 0..1 — 1 is a substring hit (e.g. "THE KABIN LEEDS …" vs "The Kabin").
+function _supplierSimilarity(statementDesc, supplierName){
+  if (!statementDesc || !supplierName) return 0;
+  const norm = s => String(s).toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+  const a = norm(statementDesc); const b = norm(supplierName);
+  if (!a || !b) return 0;
+  if (a.includes(b) || b.includes(a)) return 1;
+  // Token overlap (ignore very short tokens like "of", "to")
+  const tokensA = new Set(a.split(' ').filter(t=>t.length>2));
+  const tokensB = new Set(b.split(' ').filter(t=>t.length>2));
+  if (!tokensA.size || !tokensB.size) return 0;
+  const common = [...tokensA].filter(t => tokensB.has(t));
+  return common.length / Math.max(tokensA.size, tokensB.size);
+}
 function autoMatchStatement(statementTxs, reportLines){
   // For each statement tx, find the closest unmatched report line with the same amount and date within ±5 days.
   const used = new Set();
@@ -2638,6 +2653,7 @@ async function renderReconcileModal(){
         <label class="btn btn-outline" style="cursor:pointer;margin:0">📤 Upload statement (CSV or PDF)
           <input type="file" accept=".csv,.pdf,application/pdf,text/csv,text/plain" style="display:none" onchange="uploadCcStatement(event)">
         </label>
+        ${txs.length ? `<button class="btn btn-info" onclick="runSupplierAutoMatch()" title="Pair remaining transactions to lines with the same amount and a matching supplier name">🔍 Auto match by supplier</button>` : ''}
         ${window._recon.fileName ? `<span class="small muted">📄 ${esc(window._recon.fileName)} · uploaded ${fmtDate(window._recon.uploadedAt)}</span>` : `<span class="small muted">CSV is recommended — it&rsquo;s the most reliable. Auto-matching pairs each transaction to a line within ±5 days at the same amount.</span>`}
       </div>
     </div>
@@ -2707,6 +2723,38 @@ async function uploadCcStatement(e){
   await persistReconciliation();
   const matched = result.txs.filter(t=>t.matched_line_id).length;
   toast(`Parsed ${txs.length} transactions · ${matched} auto-matched`,'success');
+  await renderReconcileModal();
+}
+// Manual "Auto match" button — runs a second pass over already-uploaded statement
+// transactions, pairing unmatched ones to unmatched lines that have the same amount
+// AND a supplier name that looks like the statement description (substring or token-overlap >= 0.6).
+async function runSupplierAutoMatch(){
+  if (!window._recon){ return; }
+  const reportId = window._recon.reportId;
+  const lines = await reportLines(reportId);
+  const sups = await refAll('suppliers');
+  const supName = id => sups.find(s=>s.id===id)?.name || '';
+  const usedLineIds = new Set(window._recon.txs.filter(t=>t.matched_line_id).map(t=>t.matched_line_id));
+  let added = 0;
+  for (const tx of window._recon.txs){
+    if (tx.matched_line_id) continue;
+    const candidates = lines
+      .filter(l => !usedLineIds.has(l.id))
+      .filter(l => Math.abs((Number(l.amount)||0) - tx.amount) < 0.005)
+      .map(l => ({ line:l, score:_supplierSimilarity(tx.description, supName(l.supplier_id)) }))
+      .filter(c => c.score >= 0.6)
+      .sort((a,b) => b.score - a.score
+        || Math.abs(new Date(a.line.line_date) - new Date(tx.date)) - Math.abs(new Date(b.line.line_date) - new Date(tx.date)));
+    if (candidates.length){
+      const m = candidates[0];
+      tx.matched_line_id = m.line.id; tx.ticked = true;
+      window._recon.tickedLineIds.add(m.line.id);
+      usedLineIds.add(m.line.id);
+      added++;
+    }
+  }
+  await persistReconciliation();
+  toast(added ? `Auto-matched ${added} more transaction${added>1?'s':''} by supplier` : 'No further matches found — try ticking remaining items manually','info');
   await renderReconcileModal();
 }
 async function completeReconciliation(reportId){
