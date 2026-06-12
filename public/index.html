@@ -2665,7 +2665,8 @@ async function renderReconcileModal(){
           <input type="file" accept=".csv,.pdf,application/pdf,text/csv,text/plain" style="display:none" onchange="uploadCcStatement(event)">
         </label>
         ${txs.length ? `<button class="btn btn-info" onclick="runSupplierAutoMatch()" title="Pair remaining transactions to lines with the same amount and a matching supplier name">🔍 Auto match by supplier</button>` : ''}
-        ${window._recon.fileName ? `<span class="small muted">📄 ${esc(window._recon.fileName)} · uploaded ${fmtDate(window._recon.uploadedAt)}</span>` : `<span class="small muted">CSV is recommended — it&rsquo;s the most reliable. Auto-matching pairs each transaction to a line within ±5 days at the same amount.</span>`}
+        ${window._recon.fileName ? `<span class="small muted">📄 ${esc(window._recon.fileName)} · uploaded ${fmtDate(window._recon.uploadedAt)}</span>
+          <button class="btn btn-sm btn-danger" onclick="removeReconciliationStatement()" title="Remove the uploaded statement and clear all reconciliation progress">🗑 Remove statement</button>` : `<span class="small muted">CSV is recommended — it&rsquo;s the most reliable. Auto-matching pairs each transaction to a line within ±5 days at the same amount.</span>`}
       </div>
     </div>
     <div class="stat-grid" style="margin-bottom:14px">
@@ -2766,6 +2767,23 @@ async function runSupplierAutoMatch(){
   }
   await persistReconciliation();
   toast(added ? `Auto-matched ${added} more transaction${added>1?'s':''} by supplier` : 'No further matches found — try ticking remaining items manually','info');
+  await renderReconcileModal();
+}
+// Remove an already-uploaded statement and reset all reconciliation progress on this report.
+async function removeReconciliationStatement(){
+  if (!window._recon) return;
+  if (!confirm('Remove the uploaded statement? This clears all reconciliation progress (ticks and the completion status) for this report.')) return;
+  const reportId = window._recon.reportId;
+  window._recon.txs = [];
+  window._recon.tickedLineIds = new Set();
+  window._recon.fileName = '';
+  window._recon.uploadedAt = null;
+  window._recon.completed = false;
+  window._recon.completedAt = null;
+  const r = await idbGet('reports', reportId);
+  if (r){ delete r.reconciliation; await idbPut('reports', r); }
+  await logAction('cc_statement_removed', { report_id: reportId });
+  toast('Statement removed — upload a new one to reconcile', 'info');
   await renderReconcileModal();
 }
 async function completeReconciliation(reportId){
